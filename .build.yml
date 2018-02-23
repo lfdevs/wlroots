@@ -1,0 +1,27 @@
+image: archlinux
+packages:
+  - meson
+  - wayland
+  - wayland-protocols
+  - mesa
+  - libinput
+  - libxkbcommon
+  - xcb-util-image
+  - libcap
+  - pixman
+  - clang
+sources:
+  - https://git.sr.ht/~sircmpwn/wlroots
+tasks:
+  - setup: |
+      mkdir wlroots/build-{gcc,clang}
+      cd wlroots/build-gcc
+      CC=gcc meson ..
+      cd ../build-clang
+      CC=clang meson ..
+  - gcc: |
+      cd wlroots/build-gcc
+      ninja
+  - clang: |
+      cd wlroots/build-clang
+      ninja
