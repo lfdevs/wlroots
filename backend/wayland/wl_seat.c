@@ -194,7 +194,7 @@ static void keyboard_handle_keymap(void *data, struct wl_keyboard *wl_keyboard,
 	// TODO: set keymap
 }
 
-static uint32_t get_current_time_msec() {
+static uint32_t get_current_time_msec(void) {
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	return now.tv_nsec / 1000;
@@ -331,6 +331,11 @@ struct wlr_wl_pointer *pointer_get_wl(struct wlr_pointer *wlr_pointer) {
 
 static void pointer_destroy(struct wlr_pointer *wlr_pointer) {
 	struct wlr_wl_pointer *pointer = pointer_get_wl(wlr_pointer);
+
+	if (pointer->output->backend->current_pointer == pointer) {
+		pointer->output->backend->current_pointer = NULL;
+	}
+
 	wl_list_remove(&pointer->output_destroy.link);
 	free(pointer);
 }

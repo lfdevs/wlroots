@@ -1,4 +1,9 @@
 /*
+ * This protocol is obsolete and will be removed in a future version. The
+ * recommended replacement is xdg-shell.
+ */
+
+/*
  * This an unstable interface of wlroots. No guarantees are made regarding the
  * future consistency of this API.
  */
@@ -14,6 +19,10 @@
 #include <wlr/types/wlr_seat.h>
 #include "xdg-shell-unstable-v6-protocol.h"
 
+/**
+ * An interface enabling clients to turn their wl_surfaces into windows in a
+ * desktop environment.
+ */
 struct wlr_xdg_shell_v6 {
 	struct wl_global *global;
 	struct wl_list clients;
@@ -103,6 +112,12 @@ struct wlr_xdg_toplevel_v6_state {
 	uint32_t width, height;
 	uint32_t max_width, max_height;
 	uint32_t min_width, min_height;
+
+	// Since the fullscreen request may be made before the toplevel's surface
+	// is mapped, this is used to store the requested fullscreen output (if
+	// any) for wlr_xdg_toplevel_v6::client_pending.
+	struct wlr_output *fullscreen_output;
+	struct wl_listener fullscreen_output_destroy;
 };
 
 /**

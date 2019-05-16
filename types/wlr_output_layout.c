@@ -127,10 +127,6 @@ static void output_layout_reconfigure(struct wlr_output_layout *layout) {
 		max_x += box->width;
 	}
 
-	wl_list_for_each(l_output, &layout->outputs, link) {
-		wlr_output_set_position(l_output->output, l_output->x, l_output->y);
-	}
-
 	wlr_signal_emit_safe(&layout->events.change, layout);
 }
 
@@ -380,22 +376,24 @@ struct wlr_box *wlr_output_layout_get_box(
 		}
 	} else {
 		// layout extents
-		int min_x = INT_MAX, min_y = INT_MAX;
-		int max_x = INT_MIN, max_y = INT_MIN;
-		wl_list_for_each(l_output, &layout->outputs, link) {
-			struct wlr_box *box = output_layout_output_get_box(l_output);
-
-			if (box->x < min_x) {
-				min_x = box->x;
-			}
-			if (box->y < min_y) {
-				min_y = box->y;
-			}
-			if (box->x + box->width > max_x) {
-				max_x = box->x + box->width;
-			}
-			if (box->y + box->height > max_y) {
-				max_y = box->y + box->height;
+		int min_x = 0, max_x = 0, min_y = 0, max_y = 0;
+		if (!wl_list_empty(&layout->outputs)) {
+			min_x = min_y = INT_MAX;
+			max_x = max_y = INT_MIN;
+			wl_list_for_each(l_output, &layout->outputs, link) {
+				struct wlr_box *box = output_layout_output_get_box(l_output);
+				if (box->x < min_x) {
+					min_x = box->x;
+				}
+				if (box->y < min_y) {
+					min_y = box->y;
+				}
+				if (box->x + box->width > max_x) {
+					max_x = box->x + box->width;
+				}
+				if (box->y + box->height > max_y) {
+					max_y = box->y + box->height;
+				}
 			}
 		}
 

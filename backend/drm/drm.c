@@ -2,8 +2,6 @@
 #include <assert.h>
 #include <drm_fourcc.h>
 #include <drm_mode.h>
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
 #include <errno.h>
 #include <gbm.h>
 #include <GLES2/gl2.h>
@@ -133,7 +131,10 @@ static bool init_planes(struct wlr_drm_backend *drm) {
 				rgb_format = fmt;
 			}
 		}
-		if (rgb_format == DRM_FORMAT_INVALID) {
+		// Some overlays exist which don't support XRGB8888/ARGB8888
+		// We aren't even using overlay planes currently, so don't fail
+		// on something unnecessary.
+		if (type != DRM_PLANE_TYPE_OVERLAY && rgb_format == DRM_FORMAT_INVALID) {
 			wlr_log(WLR_ERROR, "Failed to find an RGB format for plane %zu", i);
 			drmModeFreePlane(plane);
 			goto error_planes;
@@ -226,12 +227,6 @@ void finish_drm_resources(struct wlr_drm_backend *drm) {
 		}
 		free(crtc->gamma_table);
 	}
-	for (size_t i = 0; i < drm->num_planes; ++i) {
-		struct wlr_drm_plane *plane = &drm->planes[i];
-		if (plane->cursor_bo) {
-			gbm_bo_destroy(plane->cursor_bo);
-		}
-	}
 
 	free(drm->crtcs);
 	free(drm->planes);
@@ -243,14 +238,13 @@ static struct wlr_drm_connector *get_drm_connector_from_output(
 	return (struct wlr_drm_connector *)wlr_output;
 }
 
-static bool drm_connector_make_current(struct wlr_output *output,
+static bool drm_connector_attach_render(struct wlr_output *output,
 		int *buffer_age) {
 	struct wlr_drm_connector *conn = get_drm_connector_from_output(output);
 	return make_drm_surface_current(&conn->crtc->primary->surf, buffer_age);
 }
 
-static bool drm_connector_swap_buffers(struct wlr_output *output,
-		pixman_region32_t *damage) {
+static bool drm_connector_commit(struct wlr_output *output) {
 	struct wlr_drm_connector *conn = get_drm_connector_from_output(output);
 	struct wlr_drm_backend *drm = get_drm_backend_from_backend(output->backend);
 	if (!drm->session->active) {
@@ -262,6 +256,11 @@ static bool drm_connector_swap_buffers(struct wlr_output *output,
 		return false;
 	}
 	struct wlr_drm_plane *plane = crtc->primary;
+
+	pixman_region32_t *damage = NULL;
+	if (output->pending.committed & WLR_OUTPUT_STATE_DAMAGE) {
+		damage = &output->pending.damage;
+	}
 
 	struct gbm_bo *bo = swap_drm_surface_buffers(&plane->surf, damage);
 	if (drm->parent) {
@@ -339,7 +338,7 @@ bool set_drm_connector_gamma(struct wlr_output *output, size_t size,
 
 	bool ok = drm->iface->crtc_set_gamma(drm, conn->crtc, size, _r, _g, _b);
 	if (ok) {
-		wlr_output_update_needs_swap(output);
+		wlr_output_update_needs_frame(output);
 
 		free(conn->crtc->gamma_table);
 		conn->crtc->gamma_table = gamma_table;
@@ -397,9 +396,6 @@ static void drm_connector_start_renderer(struct wlr_drm_connector *conn) {
 			1000000.0f / conn->output.current_mode->refresh);
 	}
 }
-
-static bool drm_connector_set_mode(struct wlr_output *output,
-	struct wlr_output_mode *mode);
 
 static void realloc_crtcs(struct wlr_drm_backend *drm, bool *changed_outputs);
 
@@ -528,7 +524,7 @@ static void realloc_planes(struct wlr_drm_backend *drm, const uint32_t *crtc_in,
 
 static void drm_connector_cleanup(struct wlr_drm_connector *conn);
 
-static bool drm_connector_set_mode(struct wlr_output *output,
+bool drm_connector_set_mode(struct wlr_output *output,
 		struct wlr_output_mode *mode) {
 	struct wlr_drm_connector *conn = get_drm_connector_from_output(output);
 	struct wlr_drm_backend *drm = get_drm_backend_from_backend(output->backend);
@@ -638,20 +634,25 @@ static bool drm_connector_set_cursor(struct wlr_output *output,
 		ret = drmGetCap(drm->fd, DRM_CAP_CURSOR_HEIGHT, &h);
 		h = ret ? 64 : h;
 
-		struct wlr_drm_renderer *renderer =
-			drm->parent ? &drm->parent->renderer : &drm->renderer;
 
-		if (!init_drm_surface(&plane->surf, renderer, w, h,
-				renderer->gbm_format, 0)) {
-			wlr_log(WLR_ERROR, "Cannot allocate cursor resources");
-			return false;
-		}
+		if (!drm->parent) {
+			if (!init_drm_surface(&plane->surf, &drm->renderer, w, h,
+					drm->renderer.gbm_format, GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT)) {
+				wlr_log(WLR_ERROR, "Cannot allocate cursor resources");
+				return false;
+			}
+		} else {
+			if (!init_drm_surface(&plane->surf, &drm->parent->renderer, w, h,
+					drm->parent->renderer.gbm_format, GBM_BO_USE_LINEAR)) {
+				wlr_log(WLR_ERROR, "Cannot allocate cursor resources");
+				return false;
+			}
 
-		plane->cursor_bo = gbm_bo_create(drm->renderer.gbm, w, h,
-			renderer->gbm_format, GBM_BO_USE_CURSOR | GBM_BO_USE_WRITE);
-		if (!plane->cursor_bo) {
-			wlr_log_errno(WLR_ERROR, "Failed to create cursor bo");
-			return false;
+			if (!init_drm_surface(&plane->mgpu_surf, &drm->renderer, w, h,
+					drm->renderer.gbm_format, GBM_BO_USE_LINEAR | GBM_BO_USE_SCANOUT)) {
+				wlr_log(WLR_ERROR, "Cannot allocate cursor resources");
+				return false;
+			}
 		}
 	}
 
@@ -676,7 +677,7 @@ static bool drm_connector_set_cursor(struct wlr_output *output,
 			return false;
 		}
 
-		wlr_output_update_needs_swap(output);
+		wlr_output_update_needs_frame(output);
 	}
 
 	if (!update_texture) {
@@ -697,17 +698,6 @@ static bool drm_connector_set_cursor(struct wlr_output *output,
 			return false;
 		}
 
-		uint32_t bo_width = gbm_bo_get_width(plane->cursor_bo);
-		uint32_t bo_height = gbm_bo_get_height(plane->cursor_bo);
-
-		uint32_t bo_stride;
-		void *bo_data;
-		if (!gbm_bo_map(plane->cursor_bo, 0, 0, bo_width, bo_height,
-				GBM_BO_TRANSFER_WRITE, &bo_stride, &bo_data)) {
-			wlr_log_errno(WLR_ERROR, "Unable to map buffer");
-			return false;
-		}
-
 		make_drm_surface_current(&plane->surf, NULL);
 
 		struct wlr_renderer *rend = plane->surf.renderer->wlr_rend;
@@ -722,12 +712,7 @@ static bool drm_connector_set_cursor(struct wlr_output *output,
 		wlr_render_texture_with_matrix(rend, texture, matrix, 1.0);
 		wlr_renderer_end(rend);
 
-		wlr_renderer_read_pixels(rend, WL_SHM_FORMAT_ARGB8888, NULL, bo_stride,
-			plane->surf.width, plane->surf.height, 0, 0, 0, 0, bo_data);
-
 		swap_drm_surface_buffers(&plane->surf, NULL);
-
-		gbm_bo_unmap(plane->cursor_bo, bo_data);
 
 		plane->cursor_enabled = true;
 	}
@@ -736,10 +721,23 @@ static bool drm_connector_set_cursor(struct wlr_output *output,
 		return true; // will be committed when session is resumed
 	}
 
-	struct gbm_bo *bo = plane->cursor_enabled ? plane->cursor_bo : NULL;
+	struct gbm_bo *bo = plane->cursor_enabled ? plane->surf.back : NULL;
+	if (bo && drm->parent) {
+		bo = copy_drm_surface_mgpu(&plane->mgpu_surf, bo);
+	}
+
+	if (bo) {
+		// workaround for nouveau
+		// Buffers created with GBM_BO_USER_LINEAR are placed in NOUVEAU_GEM_DOMAIN_GART.
+		// When the bo is attached to the cursor plane it is moved to NOUVEAU_GEM_DOMAIN_VRAM.
+		// However, this does not wait for the render operations to complete, leaving an empty surface.
+		// see https://bugs.freedesktop.org/show_bug.cgi?id=109631
+		// The render operations can be waited for using:
+		glFinish();
+	}
 	bool ok = drm->iface->crtc_set_cursor(drm, crtc, bo);
 	if (ok) {
-		wlr_output_update_needs_swap(output);
+		wlr_output_update_needs_frame(output);
 	}
 	return ok;
 }
@@ -776,7 +774,7 @@ static bool drm_connector_move_cursor(struct wlr_output *output,
 
 	bool ok = drm->iface->crtc_move_cursor(drm, conn->crtc, box.x, box.y);
 	if (ok) {
-		wlr_output_update_needs_swap(output);
+		wlr_output_update_needs_frame(output);
 	}
 	return ok;
 }
@@ -838,8 +836,8 @@ static const struct wlr_output_impl output_impl = {
 	.set_cursor = drm_connector_set_cursor,
 	.move_cursor = drm_connector_move_cursor,
 	.destroy = drm_connector_destroy,
-	.make_current = drm_connector_make_current,
-	.swap_buffers = drm_connector_swap_buffers,
+	.attach_render = drm_connector_attach_render,
+	.commit = drm_connector_commit,
 	.set_gamma = set_drm_connector_gamma,
 	.get_gamma_size = drm_connector_get_gamma_size,
 	.export_dmabuf = drm_connector_export_dmabuf,
@@ -895,8 +893,9 @@ static void dealloc_crtc(struct wlr_drm_connector *conn) {
 
 static void realloc_crtcs(struct wlr_drm_backend *drm, bool *changed_outputs) {
 	size_t num_outputs = wl_list_length(&drm->outputs);
+	bool changed_local = changed_outputs ? false : true;
 
-	if (changed_outputs == NULL) {
+	if (changed_local) {
 		changed_outputs = calloc(num_outputs, sizeof(bool));
 		if (changed_outputs == NULL) {
 			wlr_log(WLR_ERROR, "Allocation failed");
@@ -959,7 +958,7 @@ static void realloc_crtcs(struct wlr_drm_backend *drm, bool *changed_outputs) {
 				connectors[crtc[i]]->desired_enabled) {
 			wlr_log(WLR_DEBUG, "Could not match a CRTC for connected output %d",
 				crtc[i]);
-			return;
+			goto free_changed_outputs;
 		}
 	}
 
@@ -1027,6 +1026,11 @@ static void realloc_crtcs(struct wlr_drm_backend *drm, bool *changed_outputs) {
 		drm_connector_start_renderer(conn);
 
 		wlr_output_damage_whole(&conn->output);
+	}
+
+free_changed_outputs:
+	if (changed_local) {
+		free(changed_outputs);
 	}
 }
 
@@ -1205,6 +1209,9 @@ void scan_drm_connectors(struct wlr_drm_backend *drm) {
 				mode->wlr_mode.width = mode->drm_mode.hdisplay;
 				mode->wlr_mode.height = mode->drm_mode.vdisplay;
 				mode->wlr_mode.refresh = calculate_refresh_rate(&mode->drm_mode);
+				if (mode->drm_mode.type & DRM_MODE_TYPE_PREFERRED) {
+					mode->wlr_mode.preferred = true;
+				}
 
 				wlr_log(WLR_INFO, "  %"PRId32"x%"PRId32"@%"PRId32,
 					mode->wlr_mode.width, mode->wlr_mode.height,
@@ -1381,6 +1388,7 @@ void restore_drm_outputs(struct wlr_drm_backend *drm) {
 
 		drmModeSetCrtc(drm->fd, crtc->crtc_id, crtc->buffer_id, crtc->x, crtc->y,
 			&conn->id, 1, &crtc->mode);
+		drmModeSetCursor(drm->fd, crtc->crtc_id, 0, 0, 0);
 	}
 }
 
@@ -1427,7 +1435,7 @@ static void drm_connector_cleanup(struct wlr_drm_connector *conn) {
 			wl_event_source_remove(conn->output.idle_frame);
 			conn->output.idle_frame = NULL;
 		}
-		conn->output.needs_swap = false;
+		conn->output.needs_frame = false;
 		conn->output.frame_pending = false;
 
 		/* Fallthrough */

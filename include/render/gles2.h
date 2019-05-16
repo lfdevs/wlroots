@@ -1,8 +1,6 @@
 #ifndef RENDER_GLES2_H
 #define RENDER_GLES2_H
 
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <stdbool.h>
@@ -15,8 +13,6 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/render/wlr_texture.h>
 #include <wlr/util/log.h>
-
-extern PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
 
 struct wlr_gles2_pixel_format {
 	enum wl_shm_format wl_format;

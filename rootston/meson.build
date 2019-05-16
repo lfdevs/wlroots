@@ -9,13 +9,14 @@ sources = [
 	'layer_shell.c',
 	'main.c',
 	'output.c',
+	'render.c',
 	'seat.c',
 	'switch.c',
 	'text_input.c',
+	'view.c',
 	'virtual_keyboard.c',
-	'wl_shell.c',
-	'xdg_shell.c',
 	'xdg_shell_v6.c',
+	'xdg_shell.c',
 ]
 
 if conf_data.get('WLR_HAS_XWAYLAND', 0) == 1

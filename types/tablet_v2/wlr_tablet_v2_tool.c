@@ -23,7 +23,7 @@ static void handle_tablet_tool_v2_set_cursor(struct wl_client *client,
 		struct wl_resource *surface_resource,
 		int32_t hotspot_x, int32_t hotspot_y) {
 	struct wlr_tablet_tool_client_v2 *tool = tablet_tool_client_from_resource(resource);
-	if (!tool) {
+	if (!tool || !tool->tool) {
 		return;
 	}
 
@@ -313,6 +313,8 @@ void wlr_send_tablet_v2_tablet_tool_proximity_in(
 	if (tool->focused_surface == surface) {
 		return;
 	}
+
+	wlr_send_tablet_v2_tablet_tool_proximity_out(tool);
 
 	struct wlr_tablet_client_v2 *tablet_tmp;
 	struct wlr_tablet_client_v2 *tablet_client = NULL;

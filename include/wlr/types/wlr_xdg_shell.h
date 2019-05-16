@@ -105,6 +105,12 @@ struct wlr_xdg_toplevel_state {
 	uint32_t width, height;
 	uint32_t max_width, max_height;
 	uint32_t min_width, min_height;
+
+	// Since the fullscreen request may be made before the toplevel's surface
+	// is mapped, this is used to store the requested fullscreen output (if
+	// any) for wlr_xdg_toplevel::client_pending.
+	struct wlr_output *fullscreen_output;
+	struct wl_listener fullscreen_output_destroy;
 };
 
 struct wlr_xdg_toplevel {
@@ -242,9 +248,6 @@ struct wlr_xdg_surface *wlr_xdg_surface_from_popup_resource(
 		struct wl_resource *resource);
 struct wlr_xdg_surface *wlr_xdg_surface_from_toplevel_resource(
 		struct wl_resource *resource);
-
-struct wlr_box wlr_xdg_positioner_get_geometry(
-		struct wlr_xdg_positioner *positioner);
 
 /**
  * Send a ping to the surface. If the surface does not respond in a reasonable

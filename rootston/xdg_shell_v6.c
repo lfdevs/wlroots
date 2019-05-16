@@ -10,24 +10,26 @@
 #include "rootston/input.h"
 #include "rootston/server.h"
 
+static const struct roots_view_child_interface popup_impl;
+
 static void popup_destroy(struct roots_view_child *child) {
-	assert(child->destroy == popup_destroy);
+	assert(child->impl == &popup_impl);
 	struct roots_xdg_popup_v6 *popup = (struct roots_xdg_popup_v6 *)child;
-	if (popup == NULL) {
-		return;
-	}
 	wl_list_remove(&popup->destroy.link);
 	wl_list_remove(&popup->new_popup.link);
 	wl_list_remove(&popup->map.link);
 	wl_list_remove(&popup->unmap.link);
-	view_child_finish(&popup->view_child);
 	free(popup);
 }
+
+static const struct roots_view_child_interface popup_impl = {
+	.destroy = popup_destroy,
+};
 
 static void popup_handle_destroy(struct wl_listener *listener, void *data) {
 	struct roots_xdg_popup_v6 *popup =
 		wl_container_of(listener, popup, destroy);
-	popup_destroy((struct roots_view_child *)popup);
+	view_child_destroy(&popup->view_child);
 }
 
 static void popup_handle_map(struct wl_listener *listener, void *data) {
@@ -85,21 +87,20 @@ static void popup_unconstrain(struct roots_xdg_popup_v6 *popup) {
 
 	struct wlr_output *output =
 		wlr_output_layout_output_at(layout, dest_x, dest_y);
-
 	if (output == NULL) {
 		return;
 	}
 
-	int width = 0, height = 0;
-	wlr_output_effective_resolution(output, &width, &height);
+	struct wlr_box *output_box =
+		wlr_output_layout_get_box(view->desktop->layout, output);
 
 	// the output box expressed in the coordinate system of the toplevel parent
 	// of the popup
 	struct wlr_box output_toplevel_sx_box = {
-		.x = output->lx - view->box.x,
-		.y = output->ly - view->box.y,
-		.width = width,
-		.height = height
+		.x = output_box->x - view->box.x,
+		.y = output_box->y - view->box.y,
+		.width = output_box->width,
+		.height = output_box->height,
 	};
 
 	wlr_xdg_popup_v6_unconstrain_from_box(popup->wlr_popup, &output_toplevel_sx_box);
@@ -113,8 +114,8 @@ static struct roots_xdg_popup_v6 *popup_create(struct roots_view *view,
 		return NULL;
 	}
 	popup->wlr_popup = wlr_popup;
-	popup->view_child.destroy = popup_destroy;
-	view_child_init(&popup->view_child, view, wlr_popup->base->surface);
+	view_child_init(&popup->view_child, &popup_impl,
+		view, wlr_popup->base->surface);
 	popup->destroy.notify = popup_handle_destroy;
 	wl_signal_add(&wlr_popup->base->events.destroy, &popup->destroy);
 	popup->map.notify = popup_handle_map;
@@ -130,9 +131,9 @@ static struct roots_xdg_popup_v6 *popup_create(struct roots_view *view,
 }
 
 
-static void get_size(const struct roots_view *view, struct wlr_box *box) {
-	assert(view->type == ROOTS_XDG_SHELL_V6_VIEW);
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+static void get_size(struct roots_view *view, struct wlr_box *box) {
+	struct wlr_xdg_surface_v6 *surface =
+		roots_xdg_surface_v6_from_view(view)->xdg_surface_v6;
 
 	struct wlr_box geo_box;
 	wlr_xdg_surface_v6_get_geometry(surface, &geo_box);
@@ -141,8 +142,8 @@ static void get_size(const struct roots_view *view, struct wlr_box *box) {
 }
 
 static void activate(struct roots_view *view, bool active) {
-	assert(view->type == ROOTS_XDG_SHELL_V6_VIEW);
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+	struct wlr_xdg_surface_v6 *surface =
+		roots_xdg_surface_v6_from_view(view)->xdg_surface_v6;
 	if (surface->role == WLR_XDG_SURFACE_V6_ROLE_TOPLEVEL) {
 		wlr_xdg_toplevel_v6_set_activated(surface, active);
 	}
@@ -170,8 +171,8 @@ static void apply_size_constraints(struct wlr_xdg_surface_v6 *surface,
 }
 
 static void resize(struct roots_view *view, uint32_t width, uint32_t height) {
-	assert(view->type == ROOTS_XDG_SHELL_V6_VIEW);
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+	struct wlr_xdg_surface_v6 *surface =
+		roots_xdg_surface_v6_from_view(view)->xdg_surface_v6;
 	if (surface->role != WLR_XDG_SURFACE_V6_ROLE_TOPLEVEL) {
 		return;
 	}
@@ -186,9 +187,9 @@ static void resize(struct roots_view *view, uint32_t width, uint32_t height) {
 
 static void move_resize(struct roots_view *view, double x, double y,
 		uint32_t width, uint32_t height) {
-	assert(view->type == ROOTS_XDG_SHELL_V6_VIEW);
-	struct roots_xdg_surface_v6 *roots_surface = view->roots_xdg_surface_v6;
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+	struct roots_xdg_surface_v6 *roots_surface =
+		roots_xdg_surface_v6_from_view(view);
+	struct wlr_xdg_surface_v6 *surface = roots_surface->xdg_surface_v6;
 	if (surface->role != WLR_XDG_SURFACE_V6_ROLE_TOPLEVEL) {
 		return;
 	}
@@ -224,8 +225,8 @@ static void move_resize(struct roots_view *view, double x, double y,
 }
 
 static void maximize(struct roots_view *view, bool maximized) {
-	assert(view->type == ROOTS_XDG_SHELL_V6_VIEW);
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+	struct wlr_xdg_surface_v6 *surface =
+		roots_xdg_surface_v6_from_view(view)->xdg_surface_v6;
 	if (surface->role != WLR_XDG_SURFACE_V6_ROLE_TOPLEVEL) {
 		return;
 	}
@@ -234,8 +235,8 @@ static void maximize(struct roots_view *view, bool maximized) {
 }
 
 static void set_fullscreen(struct roots_view *view, bool fullscreen) {
-	assert(view->type == ROOTS_XDG_SHELL_V6_VIEW);
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+	struct wlr_xdg_surface_v6 *surface =
+		roots_xdg_surface_v6_from_view(view)->xdg_surface_v6;
 	if (surface->role != WLR_XDG_SURFACE_V6_ROLE_TOPLEVEL) {
 		return;
 	}
@@ -244,8 +245,8 @@ static void set_fullscreen(struct roots_view *view, bool fullscreen) {
 }
 
 static void close(struct roots_view *view) {
-	assert(view->type == ROOTS_XDG_SHELL_V6_VIEW);
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+	struct wlr_xdg_surface_v6 *surface =
+		roots_xdg_surface_v6_from_view(view)->xdg_surface_v6;
 	struct wlr_xdg_popup_v6 *popup = NULL;
 	wl_list_for_each(popup, &surface->popups, link) {
 		wlr_xdg_surface_v6_send_close(popup->base);
@@ -253,9 +254,16 @@ static void close(struct roots_view *view) {
 	wlr_xdg_surface_v6_send_close(surface);
 }
 
+static void for_each_surface(struct roots_view *view,
+		wlr_surface_iterator_func_t iterator, void *user_data) {
+	struct wlr_xdg_surface_v6 *surface =
+		roots_xdg_surface_v6_from_view(view)->xdg_surface_v6;
+	wlr_xdg_surface_v6_for_each_surface(surface, iterator, user_data);
+}
+
 static void destroy(struct roots_view *view) {
-	assert(view->type == ROOTS_XDG_SHELL_V6_VIEW);
-	struct roots_xdg_surface_v6 *roots_xdg_surface = view->roots_xdg_surface_v6;
+	struct roots_xdg_surface_v6 *roots_xdg_surface =
+		roots_xdg_surface_v6_from_view(view);
 	wl_list_remove(&roots_xdg_surface->surface_commit.link);
 	wl_list_remove(&roots_xdg_surface->destroy.link);
 	wl_list_remove(&roots_xdg_surface->new_popup.link);
@@ -270,10 +278,21 @@ static void destroy(struct roots_view *view) {
 	free(roots_xdg_surface);
 }
 
+static const struct roots_view_interface view_impl = {
+	.activate = activate,
+	.resize = resize,
+	.move_resize = move_resize,
+	.maximize = maximize,
+	.set_fullscreen = set_fullscreen,
+	.close = close,
+	.for_each_surface = for_each_surface,
+	.destroy = destroy,
+};
+
 static void handle_request_move(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, request_move);
-	struct roots_view *view = roots_xdg_surface->view;
+	struct roots_view *view = &roots_xdg_surface->view;
 	struct roots_input *input = view->desktop->server->input;
 	struct wlr_xdg_toplevel_v6_move_event *e = data;
 	struct roots_seat *seat = input_seat_from_wlr_seat(input, e->seat->seat);
@@ -287,7 +306,7 @@ static void handle_request_move(struct wl_listener *listener, void *data) {
 static void handle_request_resize(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, request_resize);
-	struct roots_view *view = roots_xdg_surface->view;
+	struct roots_view *view = &roots_xdg_surface->view;
 	struct roots_input *input = view->desktop->server->input;
 	struct wlr_xdg_toplevel_v6_resize_event *e = data;
 	// TODO verify event serial
@@ -302,8 +321,8 @@ static void handle_request_resize(struct wl_listener *listener, void *data) {
 static void handle_request_maximize(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, request_maximize);
-	struct roots_view *view = roots_xdg_surface->view;
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+	struct roots_view *view = &roots_xdg_surface->view;
+	struct wlr_xdg_surface_v6 *surface = roots_xdg_surface->xdg_surface_v6;
 
 	if (surface->role != WLR_XDG_SURFACE_V6_ROLE_TOPLEVEL) {
 		return;
@@ -316,8 +335,8 @@ static void handle_request_fullscreen(struct wl_listener *listener,
 		void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, request_fullscreen);
-	struct roots_view *view = roots_xdg_surface->view;
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+	struct roots_view *view = &roots_xdg_surface->view;
+	struct wlr_xdg_surface_v6 *surface = roots_xdg_surface->xdg_surface_v6;
 	struct wlr_xdg_toplevel_v6_set_fullscreen_event *e = data;
 
 	if (surface->role != WLR_XDG_SURFACE_V6_ROLE_TOPLEVEL) {
@@ -331,23 +350,23 @@ static void handle_set_title(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, set_title);
 
-	view_set_title(roots_xdg_surface->view,
-			roots_xdg_surface->view->xdg_surface_v6->toplevel->title);
+	view_set_title(&roots_xdg_surface->view,
+		roots_xdg_surface->xdg_surface_v6->toplevel->title);
 }
 
 static void handle_set_app_id(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, set_app_id);
 
-	view_set_app_id(roots_xdg_surface->view,
-			roots_xdg_surface->view->xdg_surface_v6->toplevel->app_id);
+	view_set_app_id(&roots_xdg_surface->view,
+		roots_xdg_surface->xdg_surface_v6->toplevel->app_id);
 }
 
 static void handle_surface_commit(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_surface =
 		wl_container_of(listener, roots_surface, surface_commit);
-	struct roots_view *view = roots_surface->view;
-	struct wlr_xdg_surface_v6 *surface = view->xdg_surface_v6;
+	struct roots_view *view = &roots_surface->view;
+	struct wlr_xdg_surface_v6 *surface = roots_surface->xdg_surface_v6;
 
 	if (!surface->mapped) {
 		return;
@@ -384,38 +403,38 @@ static void handle_new_popup(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, new_popup);
 	struct wlr_xdg_popup_v6 *wlr_popup = data;
-	popup_create(roots_xdg_surface->view, wlr_popup);
+	popup_create(&roots_xdg_surface->view, wlr_popup);
 }
 
 static void handle_map(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, map);
-	struct roots_view *view = roots_xdg_surface->view;
+	struct roots_view *view = &roots_xdg_surface->view;
 
 	struct wlr_box box;
 	get_size(view, &box);
 	view->box.width = box.width;
 	view->box.height = box.height;
 
-	view_map(view, view->xdg_surface_v6->surface);
+	view_map(view, roots_xdg_surface->xdg_surface_v6->surface);
 	view_setup(view);
 
 	wlr_foreign_toplevel_handle_v1_set_title(view->toplevel_handle,
-			view->xdg_surface_v6->toplevel->title ?: "none");
+		roots_xdg_surface->xdg_surface_v6->toplevel->title ?: "none");
 	wlr_foreign_toplevel_handle_v1_set_app_id(view->toplevel_handle,
-			view->xdg_surface_v6->toplevel->app_id ?: "none");
+		roots_xdg_surface->xdg_surface_v6->toplevel->app_id ?: "none");
 }
 
 static void handle_unmap(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, unmap);
-	view_unmap(roots_xdg_surface->view);
+	view_unmap(&roots_xdg_surface->view);
 }
 
 static void handle_destroy(struct wl_listener *listener, void *data) {
 	struct roots_xdg_surface_v6 *roots_xdg_surface =
 		wl_container_of(listener, roots_xdg_surface, destroy);
-	view_destroy(roots_xdg_surface->view);
+	view_destroy(&roots_xdg_surface->view);
 }
 
 void handle_xdg_shell_v6_surface(struct wl_listener *listener, void *data) {
@@ -439,6 +458,10 @@ void handle_xdg_shell_v6_surface(struct wl_listener *listener, void *data) {
 	if (!roots_surface) {
 		return;
 	}
+
+	view_init(&roots_surface->view, &view_impl, ROOTS_XDG_SHELL_V6_VIEW, desktop);
+	roots_surface->xdg_surface_v6 = surface;
+
 	roots_surface->surface_commit.notify = handle_surface_commit;
 	wl_signal_add(&surface->surface->events.commit,
 		&roots_surface->surface_commit);
@@ -461,35 +484,17 @@ void handle_xdg_shell_v6_surface(struct wl_listener *listener, void *data) {
 	wl_signal_add(&surface->toplevel->events.request_fullscreen,
 		&roots_surface->request_fullscreen);
 	roots_surface->set_title.notify = handle_set_title;
-	wl_signal_add(&surface->toplevel->events.set_title, &roots_surface->set_title);
+	wl_signal_add(&surface->toplevel->events.set_title,
+		&roots_surface->set_title);
 	roots_surface->set_app_id.notify = handle_set_app_id;
 	wl_signal_add(&surface->toplevel->events.set_app_id,
 			&roots_surface->set_app_id);
 	roots_surface->new_popup.notify = handle_new_popup;
 	wl_signal_add(&surface->events.new_popup, &roots_surface->new_popup);
+}
 
-	struct roots_view *view = view_create(desktop);
-	if (!view) {
-		free(roots_surface);
-		return;
-	}
-	view->type = ROOTS_XDG_SHELL_V6_VIEW;
-
-	view->xdg_surface_v6 = surface;
-	view->roots_xdg_surface_v6 = roots_surface;
-	view->activate = activate;
-	view->resize = resize;
-	view->move_resize = move_resize;
-	view->maximize = maximize;
-	view->set_fullscreen = set_fullscreen;
-	view->close = close;
-	view->destroy = destroy;
-	roots_surface->view = view;
-
-	if (surface->toplevel->client_pending.maximized) {
-		view_maximize(view, true);
-	}
-	if (surface->toplevel->client_pending.fullscreen) {
-		view_set_fullscreen(view, true, NULL);
-	}
+struct roots_xdg_surface_v6 *roots_xdg_surface_v6_from_view(
+		struct roots_view *view) {
+	assert(view->impl == &view_impl);
+	return (struct roots_xdg_surface_v6 *)view;
 }

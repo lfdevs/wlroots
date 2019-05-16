@@ -1,7 +1,7 @@
 project(
 	'wlroots',
 	'c',
-	version: '0.2.0',
+	version: '0.6.0',
 	license: 'MIT',
 	meson_version: '>=0.48.0',
 	default_options: [
@@ -14,31 +14,44 @@ project(
 # Format of so_version is CURRENT, REVISION, AGE.
 # See: https://autotools.io/libtool/version.html
 # for a reference about clean library versioning.
-so_version = ['0', '0', '0']
+so_version = ['3', '4', '1']
 
-add_project_arguments(
-	[
-		'-DWLR_SRC_DIR="@0@"'.format(meson.current_source_dir()),
-		'-DWLR_USE_UNSTABLE',
+add_project_arguments([
+	'-DWLR_SRC_DIR="@0@"'.format(meson.current_source_dir()),
+	'-DWLR_USE_UNSTABLE',
+], language: 'c')
 
-		'-Wno-unused-parameter',
-		'-Wundef',
-	],
-	language: 'c',
-)
+cc = meson.get_compiler('c')
+
+add_project_arguments(cc.get_supported_arguments([
+	'-Wundef',
+	'-Wlogical-op',
+	'-Wmissing-include-dirs',
+	'-Wold-style-definition',
+	'-Wpointer-arith',
+	'-Winit-self',
+	'-Wstrict-prototypes',
+	'-Wimplicit-fallthrough=2',
+	'-Wendif-labels',
+	'-Wstrict-aliasing=2',
+	'-Woverflow',
+
+	'-Wno-missing-braces',
+	'-Wno-missing-field-initializers',
+	'-Wno-unused-parameter',
+]), language: 'c')
 
 conf_data = configuration_data()
 conf_data.set10('WLR_HAS_LIBCAP', false)
 conf_data.set10('WLR_HAS_SYSTEMD', false)
 conf_data.set10('WLR_HAS_ELOGIND', false)
+conf_data.set10('WLR_HAS_RDP_BACKEND', false)
 conf_data.set10('WLR_HAS_X11_BACKEND', false)
 conf_data.set10('WLR_HAS_XWAYLAND', false)
 conf_data.set10('WLR_HAS_XCB_ERRORS', false)
 conf_data.set10('WLR_HAS_XCB_ICCCM', false)
 
 wlr_inc = include_directories('.', 'include')
-
-cc = meson.get_compiler('c')
 
 # Clang complains about some zeroed initializer lists (= {0}), even though they
 # are valid
@@ -53,12 +66,14 @@ add_project_arguments('-DWL_HIDE_DEPRECATED', language: 'c')
 wayland_server = dependency('wayland-server', version: '>=1.16')
 wayland_client = dependency('wayland-client')
 wayland_egl    = dependency('wayland-egl')
-wayland_protos = dependency('wayland-protocols', version: '>=1.16')
+wayland_protos = dependency('wayland-protocols', version: '>=1.17')
 egl            = dependency('egl')
+freerdp        = dependency('freerdp2', required: get_option('freerdp'))
+winpr2         = dependency('winpr2', required: get_option('freerdp'))
 glesv2         = dependency('glesv2')
 drm            = dependency('libdrm', version: '>=2.4.95')
 gbm            = dependency('gbm', version: '>=17.1.0')
-libinput       = dependency('libinput', version: '>=1.7.0')
+libinput       = dependency('libinput', version: '>=1.9.0')
 xkbcommon      = dependency('xkbcommon')
 udev           = dependency('libudev')
 pixman         = dependency('pixman-1')
@@ -144,6 +159,7 @@ summary = [
 	'     systemd: @0@'.format(conf_data.get('WLR_HAS_SYSTEMD', false)),
 	'     elogind: @0@'.format(conf_data.get('WLR_HAS_ELOGIND', false)),
 	'    xwayland: @0@'.format(conf_data.get('WLR_HAS_XWAYLAND', false)),
+	' rdp_backend: @0@'.format(conf_data.get('WLR_HAS_RDP_BACKEND', false)),
 	' x11_backend: @0@'.format(conf_data.get('WLR_HAS_X11_BACKEND', false)),
 	'   xcb-icccm: @0@'.format(conf_data.get('WLR_HAS_XCB_ICCCM', false)),
 	'  xcb-errors: @0@'.format(conf_data.get('WLR_HAS_XCB_ERRORS', false)),

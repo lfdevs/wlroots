@@ -45,6 +45,7 @@ struct tinywl_server {
 	struct wl_listener cursor_motion_absolute;
 	struct wl_listener cursor_button;
 	struct wl_listener cursor_axis;
+	struct wl_listener cursor_frame;
 
 	struct wlr_seat *seat;
 	struct wl_listener new_input;
@@ -263,6 +264,8 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		break;
 	case WLR_INPUT_DEVICE_POINTER:
 		server_new_pointer(server, device);
+		break;
+	default:
 		break;
 	}
 	/* We need to let the wlr_seat know what our capabilities are, which is
@@ -497,6 +500,17 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
 			event->delta_discrete, event->source);
 }
 
+static void server_cursor_frame(struct wl_listener *listener, void *data) {
+	/* This event is forwarded by the cursor when a pointer emits an frame
+	 * event. Frame events are sent after regular pointer events to group
+	 * multiple events together. For instance, two axis events may happen at the
+	 * same time, in which case a frame event won't be sent in between. */
+	struct tinywl_server *server =
+		wl_container_of(listener, server, cursor_frame);
+	/* Notify the client with pointer focus of the frame event. */
+	wlr_seat_pointer_notify_frame(server->seat);
+}
+
 /* Used to move all of the data necessary to render a surface from the top-level
  * frame handler to the per-surface render function. */
 struct render_data {
@@ -577,8 +591,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 
-	/* wlr_output_make_current makes the OpenGL context current. */
-	if (!wlr_output_make_current(output->wlr_output, NULL)) {
+	/* wlr_output_attach_render makes the OpenGL context current. */
+	if (!wlr_output_attach_render(output->wlr_output, NULL)) {
 		return;
 	}
 	/* The "effective" resolution can change if you rotate your outputs. */
@@ -621,7 +635,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	/* Conclude rendering and swap the buffers, showing the final frame
 	 * on-screen. */
 	wlr_renderer_end(renderer);
-	wlr_output_swap_buffers(output->wlr_output, NULL, NULL);
+	wlr_output_commit(output->wlr_output);
 }
 
 static void server_new_output(struct wl_listener *listener, void *data) {
@@ -874,6 +888,8 @@ int main(int argc, char *argv[]) {
 	wl_signal_add(&server.cursor->events.button, &server.cursor_button);
 	server.cursor_axis.notify = server_cursor_axis;
 	wl_signal_add(&server.cursor->events.axis, &server.cursor_axis);
+	server.cursor_frame.notify = server_cursor_frame;
+	wl_signal_add(&server.cursor->events.frame, &server.cursor_frame);
 
 	/*
 	 * Configures a seat, which is a single "seat" at which a user sits and
