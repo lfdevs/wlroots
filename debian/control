@@ -1,6 +1,7 @@
 Source: wlroots
 Priority: optional
-Maintainer: Guido Günther <agx@sigxcpu.org>
+Maintainer: Sway and related packages team <team+swaywm@tracker.debian.org>
+Uploaders: Guido Günther <agx@sigxcpu.org>, Birger Schacht <birger@rantanplan.org>
 Build-Depends:
  debhelper (>= 10),
  libcap-dev,
@@ -10,6 +11,7 @@ Build-Depends:
  libgles2-mesa-dev,
  libinput-dev,
  libpixman-1-dev,
+ libpng-dev,
  libsystemd-dev,
  libwayland-dev,
  libxcb1-dev,
@@ -22,7 +24,7 @@ Build-Depends:
  meson (>= 0.43.0),
  pkg-config,
  wayland-protocols,
-Standards-Version: 4.3.0
+Standards-Version: 4.4.0
 Section: libs
 Homepage: https://github.com/swaywm/wlroots
 Vcs-Git: https://salsa.debian.org/swaywm-team/wlroots.git
