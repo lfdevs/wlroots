@@ -28,7 +28,7 @@ Build-Depends:
  meson (>= 0.51.2),
  pkg-config,
  wayland-protocols (>= 1.17),
-Standards-Version: 4.4.1
+Standards-Version: 4.5.1
 Section: libs
 Homepage: https://github.com/swaywm/wlroots
 Vcs-Git: https://salsa.debian.org/swaywm-team/wlroots.git
@@ -41,7 +41,7 @@ Architecture: any
 Multi-Arch: same
 Depends:
  ${misc:Depends},
- libwlroots6 (= ${binary:Version}),
+ libwlroots7 (= ${binary:Version}),
  libcap-dev,
  libdrm-dev,
  libegl1-mesa-dev,
@@ -67,7 +67,7 @@ Description: Modular wayland compositor library - development headers
  .
  This package contains the development headers.
 
-Package: libwlroots6
+Package: libwlroots7
 Architecture: any
 Multi-Arch: same
 Depends:
