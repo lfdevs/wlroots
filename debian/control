@@ -77,7 +77,7 @@ Description: Modular wayland compositor library - shared library
  wlroots is a set of pluggable, composable modules to build a Wayland
  composior.
  .
- This package contains the share library.
+ This package contains the shared library.
 
 Package: libwlroots-examples
 Architecture: any
