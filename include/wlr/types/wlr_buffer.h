@@ -15,10 +15,34 @@
 
 struct wlr_buffer;
 
+struct wlr_shm_attributes {
+	int fd;
+	uint32_t format;
+	int width, height, stride;
+	off_t offset;
+};
+
 struct wlr_buffer_impl {
 	void (*destroy)(struct wlr_buffer *buffer);
 	bool (*get_dmabuf)(struct wlr_buffer *buffer,
 		struct wlr_dmabuf_attributes *attribs);
+	bool (*get_shm)(struct wlr_buffer *buffer,
+		struct wlr_shm_attributes *attribs);
+	bool (*begin_data_ptr_access)(struct wlr_buffer *buffer, void **data,
+		uint32_t *format, size_t *stride);
+	void (*end_data_ptr_access)(struct wlr_buffer *buffer);
+};
+
+/**
+ * Buffer capabilities.
+ *
+ * These bits indicate the features supported by a wlr_buffer. There is one bit
+ * per function in wlr_buffer_impl.
+ */
+enum wlr_buffer_cap {
+	WLR_BUFFER_CAP_DATA_PTR = 1 << 0,
+	WLR_BUFFER_CAP_DMABUF = 1 << 1,
+	WLR_BUFFER_CAP_SHM = 1 << 2,
 };
 
 /**
@@ -36,6 +60,7 @@ struct wlr_buffer {
 
 	bool dropped;
 	size_t n_locks;
+	bool accessing_data_ptr;
 
 	struct {
 		struct wl_signal destroy;
@@ -76,6 +101,16 @@ void wlr_buffer_unlock(struct wlr_buffer *buffer);
  */
 bool wlr_buffer_get_dmabuf(struct wlr_buffer *buffer,
 	struct wlr_dmabuf_attributes *attribs);
+/**
+ * Read shared memory attributes of the buffer. If this buffer isn't shared
+ * memory, returns false.
+ *
+ * The returned shared memory attributes are valid for the lifetime of the
+ * wlr_buffer. The caller isn't responsible for cleaning up the shared memory
+ * attributes.
+ */
+bool wlr_buffer_get_shm(struct wlr_buffer *buffer,
+	struct wlr_shm_attributes *attribs);
 
 /**
  * A client buffer.

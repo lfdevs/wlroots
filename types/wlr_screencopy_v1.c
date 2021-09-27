@@ -9,7 +9,6 @@
 #include <wlr/backend.h>
 #include <wlr/util/log.h>
 #include "wlr-screencopy-unstable-v1-protocol.h"
-#include "render/wlr_renderer.h"
 #include "render/pixel_format.h"
 #include "util/signal.h"
 
@@ -251,6 +250,7 @@ static void frame_handle_output_precommit(struct wl_listener *listener,
 	wl_shm_buffer_end_access(shm_buffer);
 
 	if (!ok) {
+		wlr_log(WLR_ERROR, "Failed to read pixels from renderer");
 		zwlr_screencopy_frame_v1_send_failed(frame->resource);
 		frame_destroy(frame);
 		return;
@@ -265,42 +265,31 @@ static void frame_handle_output_precommit(struct wl_listener *listener,
 static bool blit_dmabuf(struct wlr_renderer *renderer,
 		struct wlr_dmabuf_v1_buffer *dst_dmabuf,
 		struct wlr_dmabuf_attributes *src_attrs) {
-	if (dst_dmabuf->buffer_resource == NULL) {
-		return false;
-	}
-
-	struct wlr_client_buffer *dst_client_buffer =
-		wlr_client_buffer_import(renderer, dst_dmabuf->buffer_resource);
-	if (dst_client_buffer == NULL) {
-		return false;
-	}
-	struct wlr_buffer *dst_buffer = &dst_client_buffer->base;
+	struct wlr_buffer *dst_buffer = wlr_buffer_lock(&dst_dmabuf->base);
 
 	struct wlr_texture *src_tex = wlr_texture_from_dmabuf(renderer, src_attrs);
 	if (src_tex == NULL) {
 		goto error_src_tex;
 	}
 
-	if (!wlr_renderer_bind_buffer(renderer, dst_buffer)) {
-		goto error_bind_buffer;
-	}
-
 	float mat[9];
 	wlr_matrix_identity(mat);
 	wlr_matrix_scale(mat, dst_buffer->width, dst_buffer->height);
 
-	wlr_renderer_begin(renderer, dst_buffer->width, dst_buffer->height);
+	if (!wlr_renderer_begin_with_buffer(renderer, dst_buffer)) {
+		goto error_renderer_begin;
+	}
+
 	wlr_renderer_clear(renderer, (float[]){ 0.0, 0.0, 0.0, 0.0 });
 	wlr_render_texture_with_matrix(renderer, src_tex, mat, 1.0f);
-	wlr_renderer_end(renderer);
 
-	wlr_renderer_bind_buffer(renderer, NULL);
+	wlr_renderer_end(renderer);
 
 	wlr_texture_destroy(src_tex);
 	wlr_buffer_unlock(dst_buffer);
 	return true;
 
-error_bind_buffer:
+error_renderer_begin:
 	wlr_texture_destroy(src_tex);
 error_src_tex:
 	wlr_buffer_unlock(dst_buffer);

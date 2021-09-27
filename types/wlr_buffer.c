@@ -5,11 +5,16 @@
 #include <wlr/types/wlr_linux_dmabuf_v1.h>
 #include <wlr/util/log.h>
 #include "render/pixel_format.h"
+#include "render/wlr_texture.h"
+#include "types/wlr_buffer.h"
 #include "util/signal.h"
 
 void wlr_buffer_init(struct wlr_buffer *buffer,
 		const struct wlr_buffer_impl *impl, int width, int height) {
 	assert(impl->destroy);
+	if (impl->begin_data_ptr_access || impl->end_data_ptr_access) {
+		assert(impl->begin_data_ptr_access && impl->end_data_ptr_access);
+	}
 	buffer->impl = impl;
 	buffer->width = width;
 	buffer->height = height;
@@ -21,6 +26,8 @@ static void buffer_consider_destroy(struct wlr_buffer *buffer) {
 	if (!buffer->dropped || buffer->n_locks > 0) {
 		return;
 	}
+
+	assert(!buffer->accessing_data_ptr);
 
 	wlr_signal_emit_safe(&buffer->events.destroy, NULL);
 
@@ -65,6 +72,32 @@ bool wlr_buffer_get_dmabuf(struct wlr_buffer *buffer,
 	return buffer->impl->get_dmabuf(buffer, attribs);
 }
 
+bool buffer_begin_data_ptr_access(struct wlr_buffer *buffer, void **data,
+		uint32_t *format, size_t *stride) {
+	assert(!buffer->accessing_data_ptr);
+	if (!buffer->impl->begin_data_ptr_access) {
+		return false;
+	}
+	if (!buffer->impl->begin_data_ptr_access(buffer, data, format, stride)) {
+		return false;
+	}
+	buffer->accessing_data_ptr = true;
+	return true;
+}
+
+void buffer_end_data_ptr_access(struct wlr_buffer *buffer) {
+	assert(buffer->accessing_data_ptr);
+	buffer->impl->end_data_ptr_access(buffer);
+	buffer->accessing_data_ptr = false;
+}
+
+bool wlr_buffer_get_shm(struct wlr_buffer *buffer,
+		struct wlr_shm_attributes *attribs) {
+	if (!buffer->impl->get_shm) {
+		return false;
+	}
+	return buffer->impl->get_shm(buffer, attribs);
+}
 
 bool wlr_resource_is_buffer(struct wl_resource *resource) {
 	return strcmp(wl_resource_get_class(resource), wl_buffer_interface.name) == 0;
@@ -181,34 +214,36 @@ struct wlr_client_buffer *wlr_client_buffer_import(
 	struct wlr_texture *texture = NULL;
 	bool resource_released = false;
 
-	struct wl_shm_buffer *shm_buf = wl_shm_buffer_get(resource);
-	if (shm_buf != NULL) {
-		enum wl_shm_format wl_shm_format = wl_shm_buffer_get_format(shm_buf);
-		uint32_t drm_format = convert_wl_shm_format_to_drm(wl_shm_format);
-		int32_t stride = wl_shm_buffer_get_stride(shm_buf);
-		int32_t width = wl_shm_buffer_get_width(shm_buf);
-		int32_t height = wl_shm_buffer_get_height(shm_buf);
+	if (wl_shm_buffer_get(resource) != NULL) {
+		struct wlr_shm_client_buffer *shm_client_buffer =
+			shm_client_buffer_create(resource);
+		if (shm_client_buffer == NULL) {
+			wlr_log(WLR_ERROR, "Failed to create shm client buffer");
+			return NULL;
+		}
 
-		wl_shm_buffer_begin_access(shm_buf);
-		void *data = wl_shm_buffer_get_data(shm_buf);
-		texture = wlr_texture_from_pixels(renderer, drm_format, stride,
-			width, height, data);
-		wl_shm_buffer_end_access(shm_buf);
+		// Ensure the buffer will be released before being destroyed
+		wlr_buffer_lock(&shm_client_buffer->base);
+		wlr_buffer_drop(&shm_client_buffer->base);
 
-		// We have uploaded the data, we don't need to access the wl_buffer
-		// anymore
-		wl_buffer_send_release(resource);
+		texture = wlr_texture_from_buffer(renderer, &shm_client_buffer->base);
+
+		// The renderer should've locked the buffer by now if necessary
+		wlr_buffer_unlock(&shm_client_buffer->base);
+
+		// The renderer is responsible for releasing the buffer when
+		// appropriate
 		resource_released = true;
 	} else if (wlr_renderer_resource_is_wl_drm_buffer(renderer, resource)) {
 		texture = wlr_texture_from_wl_drm(renderer, resource);
 	} else if (wlr_dmabuf_v1_resource_is_buffer(resource)) {
 		struct wlr_dmabuf_v1_buffer *dmabuf =
 			wlr_dmabuf_v1_buffer_from_buffer_resource(resource);
-		texture = wlr_texture_from_dmabuf(renderer, &dmabuf->attributes);
+		texture = wlr_texture_from_buffer(renderer, &dmabuf->base);
 
-		// We have imported the DMA-BUF, but we need to prevent the client from
-		// re-using the same DMA-BUF for the next frames, so we don't release
-		// the buffer yet.
+		// The renderer is responsible for releasing the buffer when
+		// appropriate
+		resource_released = true;
 	} else {
 		wlr_log(WLR_ERROR, "Cannot upload texture: unknown buffer type");
 
@@ -311,5 +346,108 @@ struct wlr_client_buffer *wlr_client_buffer_apply_damage(
 
 	buffer->resource = resource;
 	buffer->resource_released = true;
+	return buffer;
+}
+
+static const struct wlr_buffer_impl shm_client_buffer_impl;
+
+static struct wlr_shm_client_buffer *shm_client_buffer_from_buffer(
+		struct wlr_buffer *buffer) {
+	assert(buffer->impl == &shm_client_buffer_impl);
+	return (struct wlr_shm_client_buffer *)buffer;
+}
+
+static void shm_client_buffer_destroy(struct wlr_buffer *wlr_buffer) {
+	struct wlr_shm_client_buffer *buffer =
+		shm_client_buffer_from_buffer(wlr_buffer);
+	wl_list_remove(&buffer->resource_destroy.link);
+	wl_list_remove(&buffer->release.link);
+	if (buffer->saved_shm_pool != NULL) {
+		wl_shm_pool_unref(buffer->saved_shm_pool);
+	}
+	free(buffer);
+}
+
+static bool shm_client_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer,
+		void **data, uint32_t *format, size_t *stride) {
+	struct wlr_shm_client_buffer *buffer =
+		shm_client_buffer_from_buffer(wlr_buffer);
+	*format = buffer->format;
+	*stride = buffer->stride;
+	if (buffer->shm_buffer != NULL) {
+		*data = wl_shm_buffer_get_data(buffer->shm_buffer);
+		wl_shm_buffer_begin_access(buffer->shm_buffer);
+	} else {
+		*data = buffer->saved_data;
+	}
+	return true;
+}
+
+static void shm_client_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer) {
+	struct wlr_shm_client_buffer *buffer =
+		shm_client_buffer_from_buffer(wlr_buffer);
+	if (buffer->shm_buffer != NULL) {
+		wl_shm_buffer_end_access(buffer->shm_buffer);
+	}
+}
+
+static const struct wlr_buffer_impl shm_client_buffer_impl = {
+	.destroy = shm_client_buffer_destroy,
+	.begin_data_ptr_access = shm_client_buffer_begin_data_ptr_access,
+	.end_data_ptr_access = shm_client_buffer_end_data_ptr_access,
+};
+
+static void shm_client_buffer_resource_handle_destroy(
+		struct wl_listener *listener, void *data) {
+	struct wlr_shm_client_buffer *buffer =
+		wl_container_of(listener, buffer, resource_destroy);
+
+	// In order to still be able to access the shared memory region, we need to
+	// keep a reference to the wl_shm_pool
+	buffer->saved_shm_pool = wl_shm_buffer_ref_pool(buffer->shm_buffer);
+	buffer->saved_data = wl_shm_buffer_get_data(buffer->shm_buffer);
+
+	// The wl_shm_buffer destroys itself with the wl_resource
+	buffer->resource = NULL;
+	buffer->shm_buffer = NULL;
+	wl_list_remove(&buffer->resource_destroy.link);
+	wl_list_init(&buffer->resource_destroy.link);
+}
+
+static void shm_client_buffer_handle_release(struct wl_listener *listener,
+		void *data) {
+	struct wlr_shm_client_buffer *buffer =
+		wl_container_of(listener, buffer, release);
+	if (buffer->resource != NULL) {
+		wl_buffer_send_release(buffer->resource);
+	}
+}
+
+struct wlr_shm_client_buffer *shm_client_buffer_create(
+		struct wl_resource *resource) {
+	struct wl_shm_buffer *shm_buffer = wl_shm_buffer_get(resource);
+	assert(shm_buffer != NULL);
+
+	int32_t width = wl_shm_buffer_get_width(shm_buffer);
+	int32_t height = wl_shm_buffer_get_height(shm_buffer);
+
+	struct wlr_shm_client_buffer *buffer = calloc(1, sizeof(*buffer));
+	if (buffer == NULL) {
+		return NULL;
+	}
+	wlr_buffer_init(&buffer->base, &shm_client_buffer_impl, width, height);
+	buffer->resource = resource;
+	buffer->shm_buffer = shm_buffer;
+
+	enum wl_shm_format wl_shm_format = wl_shm_buffer_get_format(shm_buffer);
+	buffer->format = convert_wl_shm_format_to_drm(wl_shm_format);
+	buffer->stride = wl_shm_buffer_get_stride(shm_buffer);
+
+	buffer->resource_destroy.notify = shm_client_buffer_resource_handle_destroy;
+	wl_resource_add_destroy_listener(resource, &buffer->resource_destroy);
+
+	buffer->release.notify = shm_client_buffer_handle_release;
+	wl_signal_add(&buffer->base.events.release, &buffer->release);
+
 	return buffer;
 }

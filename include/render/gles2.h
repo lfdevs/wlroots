@@ -61,19 +61,13 @@ struct wlr_gles2_renderer {
 			GLint color;
 			GLint pos_attrib;
 		} quad;
-		struct {
-			GLuint program;
-			GLint proj;
-			GLint color;
-			GLint pos_attrib;
-			GLint tex_attrib;
-		} ellipse;
 		struct wlr_gles2_tex_shader tex_rgba;
 		struct wlr_gles2_tex_shader tex_rgbx;
 		struct wlr_gles2_tex_shader tex_ext;
 	} shaders;
 
 	struct wl_list buffers; // wlr_gles2_buffer.link
+	struct wl_list textures; // wlr_gles2_texture.link
 
 	struct wlr_gles2_buffer *current_buffer;
 	uint32_t viewport_width, viewport_height;
@@ -94,6 +88,7 @@ struct wlr_gles2_buffer {
 struct wlr_gles2_texture {
 	struct wlr_texture wlr_texture;
 	struct wlr_gles2_renderer *renderer;
+	struct wl_list link; // wlr_gles2_renderer.textures
 
 	// Basically:
 	//   GL_TEXTURE_2D == mutable
@@ -108,6 +103,10 @@ struct wlr_gles2_texture {
 
 	// Only affects target == GL_TEXTURE_2D
 	uint32_t drm_format; // used to interpret upload data
+	// If imported from a wlr_buffer
+	struct wlr_buffer *buffer;
+
+	struct wl_listener buffer_destroy;
 };
 
 const struct wlr_gles2_pixel_format *get_gles2_format_from_drm(uint32_t fmt);
@@ -127,6 +126,9 @@ struct wlr_texture *gles2_texture_from_wl_drm(struct wlr_renderer *wlr_renderer,
 	struct wl_resource *data);
 struct wlr_texture *gles2_texture_from_dmabuf(struct wlr_renderer *wlr_renderer,
 	struct wlr_dmabuf_attributes *attribs);
+struct wlr_texture *gles2_texture_from_buffer(struct wlr_renderer *wlr_renderer,
+	struct wlr_buffer *buffer);
+void gles2_texture_destroy(struct wlr_gles2_texture *texture);
 
 void push_gles2_debug_(struct wlr_gles2_renderer *renderer,
 	const char *file, const char *func);

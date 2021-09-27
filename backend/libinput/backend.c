@@ -47,9 +47,10 @@ static const struct libinput_interface libinput_impl = {
 
 static int handle_libinput_readable(int fd, uint32_t mask, void *_backend) {
 	struct wlr_libinput_backend *backend = _backend;
-	if (libinput_dispatch(backend->libinput_context) != 0) {
-		wlr_log(WLR_ERROR, "Failed to dispatch libinput");
-		// TODO: some kind of abort?
+	int ret = libinput_dispatch(backend->libinput_context);
+	if (ret != 0) {
+		wlr_log(WLR_ERROR, "Failed to dispatch libinput: %s", strerror(-ret));
+		wl_display_terminate(backend->display);
 		return 0;
 	}
 	struct libinput_event *event;
@@ -149,7 +150,7 @@ static void backend_destroy(struct wlr_backend *wlr_backend) {
 		free(wlr_devices);
 	}
 
-	wlr_signal_emit_safe(&wlr_backend->events.destroy, wlr_backend);
+	wlr_backend_finish(wlr_backend);
 
 	wl_list_remove(&backend->display_destroy.link);
 	wl_list_remove(&backend->session_destroy.link);

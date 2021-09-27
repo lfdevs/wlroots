@@ -241,14 +241,6 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 			"eglQueryDmaBufModifiersEXT");
 	}
 
-	if (check_egl_ext(display_exts_str, "EGL_MESA_image_dma_buf_export")) {
-		egl->exts.image_dma_buf_export_mesa = true;
-		load_egl_proc(&egl->procs.eglExportDMABUFImageQueryMESA,
-			"eglExportDMABUFImageQueryMESA");
-		load_egl_proc(&egl->procs.eglExportDMABUFImageMESA,
-			"eglExportDMABUFImageMESA");
-	}
-
 	if (check_egl_ext(display_exts_str, "EGL_WL_bind_wayland_display")) {
 		egl->exts.bind_wayland_display_wl = true;
 		load_egl_proc(&egl->procs.eglBindWaylandDisplayWL,
@@ -259,7 +251,7 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 			"eglQueryWaylandBufferWL");
 	}
 
-	const char *device_exts_str = NULL;
+	const char *device_exts_str = NULL, *driver_name = NULL;
 	if (check_egl_ext(client_exts_str, "EGL_EXT_device_query")) {
 		load_egl_proc(&egl->procs.eglQueryDisplayAttribEXT,
 			"eglQueryDisplayAttribEXT");
@@ -286,15 +278,19 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 			if (allow_software != NULL && strcmp(allow_software, "1") == 0) {
 				wlr_log(WLR_INFO, "Using software rendering");
 			} else {
-				// Because of a Mesa bug, sometimes EGL_MESA_device_software is
-				// advertised for hardware renderers. See:
-				// https://gitlab.freedesktop.org/mesa/mesa/-/issues/4178
-				// TODO: fail without WLR_RENDERER_ALLOW_SOFTWARE
-				wlr_log(WLR_INFO, "Warning: software rendering may be in use");
-				wlr_log(WLR_INFO, "If you experience slow rendering, "
-					"please check the OpenGL drivers are correctly installed");
+				wlr_log(WLR_ERROR, "Software rendering detected, please use "
+					"the WLR_RENDERER_ALLOW_SOFTWARE environment variable "
+					"to proceed");
+				goto error;
 			}
 		}
+
+#ifdef EGL_DRIVER_NAME_EXT
+		if (check_egl_ext(device_exts_str, "EGL_EXT_device_persistent_id")) {
+			driver_name = egl->procs.eglQueryDeviceStringEXT(egl->device,
+				EGL_DRIVER_NAME_EXT);
+		}
+#endif
 
 		egl->exts.device_drm_ext =
 			check_egl_ext(device_exts_str, "EGL_EXT_device_drm");
@@ -320,6 +316,9 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 		wlr_log(WLR_INFO, "Supported EGL device extensions: %s", device_exts_str);
 	}
 	wlr_log(WLR_INFO, "EGL vendor: %s", eglQueryString(egl->display, EGL_VENDOR));
+	if (driver_name != NULL) {
+		wlr_log(WLR_INFO, "EGL driver name: %s", driver_name);
+	}
 
 	init_dmabuf_formats(egl);
 
@@ -699,37 +698,6 @@ const struct wlr_drm_format_set *wlr_egl_get_dmabuf_render_formats(
 	return &egl->dmabuf_render_formats;
 }
 
-bool wlr_egl_export_image_to_dmabuf(struct wlr_egl *egl, EGLImageKHR image,
-		int32_t width, int32_t height, uint32_t flags,
-		struct wlr_dmabuf_attributes *attribs) {
-	memset(attribs, 0, sizeof(struct wlr_dmabuf_attributes));
-
-	if (!egl->exts.image_dma_buf_export_mesa) {
-		return false;
-	}
-
-	// Only one set of modifiers is returned for all planes
-	if (!egl->procs.eglExportDMABUFImageQueryMESA(egl->display, image,
-			(int *)&attribs->format, &attribs->n_planes, &attribs->modifier)) {
-		return false;
-	}
-	if (attribs->n_planes > WLR_DMABUF_MAX_PLANES) {
-		wlr_log(WLR_ERROR, "EGL returned %d planes, but only %d are supported",
-			attribs->n_planes, WLR_DMABUF_MAX_PLANES);
-		return false;
-	}
-
-	if (!egl->procs.eglExportDMABUFImageMESA(egl->display, image, attribs->fd,
-			(EGLint *)attribs->stride, (EGLint *)attribs->offset)) {
-		return false;
-	}
-
-	attribs->width = width;
-	attribs->height = height;
-	attribs->flags = flags;
-	return true;
-}
-
 static bool device_has_name(const drmDevice *device, const char *name) {
 	for (size_t i = 0; i < DRM_NODE_MAX; i++) {
 		if (!(device->available_nodes & (1 << i))) {
@@ -746,7 +714,7 @@ static char *get_render_name(const char *name) {
 	uint32_t flags = 0;
 	int devices_len = drmGetDevices2(flags, NULL, 0);
 	if (devices_len < 0) {
-		wlr_log(WLR_ERROR, "drmGetDevices2 failed");
+		wlr_log(WLR_ERROR, "drmGetDevices2 failed: %s", strerror(-devices_len));
 		return NULL;
 	}
 	drmDevice **devices = calloc(devices_len, sizeof(drmDevice *));
@@ -757,7 +725,7 @@ static char *get_render_name(const char *name) {
 	devices_len = drmGetDevices2(flags, devices, devices_len);
 	if (devices_len < 0) {
 		free(devices);
-		wlr_log(WLR_ERROR, "drmGetDevices2 failed");
+		wlr_log(WLR_ERROR, "drmGetDevices2 failed: %s", strerror(-devices_len));
 		return NULL;
 	}
 

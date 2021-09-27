@@ -9,12 +9,8 @@ if not features.get('xwayland')
 else
 	subdir('xwayland')
 endif
-if not features.get('xdg-foreign')
-	exclude_files += [
-		'types/wlr_xdg_foreign_v1.h',
-		'types/wlr_xdg_foreign_v2.h',
-		'types/wlr_xdg_foreign_registry.h',
-	]
+if not features.get('gles2-renderer')
+	exclude_files += ['render/egl.h', 'render/gles2.h']
 endif
 
 install_subdir('wlr',
