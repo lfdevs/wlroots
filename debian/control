@@ -22,6 +22,7 @@ Build-Depends:
  libxcb-icccm4-dev,
  libxcb-image0-dev,
  libxcb-render0-dev,
+ libxcb-res0-dev,
  libxcb-xfixes0-dev,
  libxcb-xinput-dev,
  libx11-xcb-dev,
@@ -29,6 +30,7 @@ Build-Depends:
  meson (>= 0.51.2),
  pkg-config,
  wayland-protocols (>= 1.17),
+ xwayland,
 Standards-Version: 4.5.1
 Section: libs
 Homepage: https://github.com/swaywm/wlroots
@@ -50,6 +52,7 @@ Depends:
  libgles2-mesa-dev,
  libinput-dev (>= 1.7.0),
  libpixman-1-dev,
+ libseat-dev,
  libsystemd-dev,
  libwayland-dev (>= 1.15),
  libxcb1-dev,
@@ -57,6 +60,7 @@ Depends:
  libxcb-icccm4-dev,
  libxcb-image0-dev,
  libxcb-render0-dev,
+ libxcb-res0-dev,
  libxcb-xfixes0-dev,
  libxcb-xinput-dev,
  libxkbcommon-dev,
