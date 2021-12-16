@@ -1,3 +1,10 @@
+wlroots (0.14.1-5) unstable; urgency=medium
+
+  * Upload to unstable
+  * [865f2f1] Drop patches backported form upstream
+
+ -- Guido Günther <agx@sigxcpu.org>  Thu, 16 Dec 2021 09:39:07 +0100
+
 wlroots (0.14.1-4) experimental; urgency=medium
 
   [ Birger Schacht ]
@@ -41,6 +48,13 @@ wlroots (0.13.0-1) experimental; urgency=medium
   * autopkgtest: Adjust to API change
 
  -- Guido Günther <agx@sigxcpu.org>  Tue, 13 Apr 2021 11:02:16 +0200
+
+wlroots (0.12.0-3) unstable; urgency=medium
+
+  * [02be191] examples/dmabuf-capture: stop using av_init_packet
+    (Closes: #996500)
+
+ -- Guido Günther <agx@sigxcpu.org>  Tue, 26 Oct 2021 10:13:01 +0200
 
 wlroots (0.12.0-2) unstable; urgency=medium
 
