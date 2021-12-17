@@ -1,22 +1,21 @@
 # Contributing to wlroots
 
-Contributing just involves sending a pull request. You will probably be more
-successful with your contribution if you visit
-[#sway-devel on Libera Chat](https://web.libera.chat/?channels=#sway-devel) upfront and
-discuss your plans.
+Contributing just involves sending a merge request. You will probably be more
+successful with your contribution if you visit [#sway-devel on Libera Chat]
+upfront and discuss your plans.
 
 Note: rules are made to be broken. Adjust or ignore any/all of these as you see
 fit, but be prepared to justify it to your peers.
 
-## Pull Requests
+## Merge Requests
 
-If you already have your own pull request habits, feel free to use them. If you
+If you already have your own merge request habits, feel free to use them. If you
 don't, however, allow me to make a suggestion: feature branches pulled from
 upstream. Try this:
 
 1. Fork wlroots
-2. `git clone https://github.com/username/wlroots && cd wlroots`
-3. `git remote add upstream https://github.com/swaywm/wlroots`
+2. `git clone git@gitlab.freedesktop.org:<username>/wlroots.git && cd wlroots`
+3. `git remote add upstream https://gitlab.freedesktop.org/wlroots/wlroots.git`
 
 You only need to do this once. You're never going to use your fork's master
 branch. Instead, when you start working on a feature, do this:
@@ -25,16 +24,51 @@ branch. Instead, when you start working on a feature, do this:
 2. `git checkout -b add-so-and-so-feature upstream/master`
 3. Add and commit your changes
 4. `git push -u origin add-so-and-so-feature`
-5. Make a pull request from your feature branch
+5. Make a merge request from your feature branch
 
-When you submit your pull request, your commit log should do most of the talking
+When you submit your merge request, your commit log should do most of the talking
 when it comes to describing your changes and their motivation. In addition to
-this, your pull request's comments will ideally include a test plan that the
+this, your merge request's comments will ideally include a test plan that the
 reviewers can use to (1) demonstrate the problem on master, if applicable and
 (2) verify that the problem no longer exists with your changes applied (or that
 your new features work correctly). Document all of the edge cases you're aware
 of so we can adequately test them - then verify the test plan yourself before
 submitting.
+
+## Commit Log
+
+Unlike many projects using GitHub and GitLab, wlroots has a [linear, "recipe"
+style] history. This means that every commit should be small, digestible,
+stand-alone, and functional. Rather than a purely chronological commit history
+like this:
+
+```
+doc: final docs for view transforms
+fix tests when disabled, redo broken doc formatting
+better transformed-view iteration (thanks Hannah!)
+try to catch more cases in tests
+tests: add new spline test
+fix compilation on splines
+doc: notes on reticulating splines
+compositor: add spline reticulation for view transforms
+```
+
+We aim to have a clean history which only reflects the final state, broken up
+into functional groupings:
+
+```
+compositor: add spline reticulation for view transforms
+compositor: new iterator for view transforms
+tests: add view-transform correctness tests
+doc: fix formatting for view transforms
+```
+
+This ensures that the final patch series only contains the final state,
+without the changes and missteps taken along the development process. A linear
+history eases reviewing, cherry-picking and reverting changes.
+
+If you aren't comfortable with manipulating the Git history, have a look at
+[git-rebase.io].
 
 ## Commit Messages
 
@@ -42,25 +76,22 @@ Please strive to write good commit messages. Here's some guidelines to follow:
 
 The first line should be limited to 50 characters and should be a sentence that
 completes the thought [When applied, this commit will...] *"Implement
-cmd_move"* or *"Fix #742"* or *"Improve performance of arrange_windows on ARM"*
-or similar.
+cmd_move"* or *"Improve performance of arrange_windows on ARM"* or similar.
 
 The subsequent lines should be separated from the subject line by a single
 blank line, and include optional details. In this you can give justification
-for the change, [reference Github
-issues](https://help.github.com/articles/closing-issues-via-commit-messages/),
-or explain some of the subtler details of your patch. This is important because
-when someone finds a line of code they don't understand later, they can use the
-`git blame` command to find out what the author was thinking when they wrote
-it. It's also easier to review your pull requests if they're separated into
-logical commits that have good commit messages and justify themselves in the
-extended commit description.
+for the change, [reference issues], or explain some of the subtler
+details of your patch. This is important because when someone finds a line of
+code they don't understand later, they can use the `git blame` command to find
+out what the author was thinking when they wrote it. It's also easier to review
+your merge requests if they're separated into logical commits that have good
+commit messages and justify themselves in the extended commit description.
 
-As a good rule of thumb, anything you might put into the pull request
-description on Github is probably fair game for going into the extended commit
+As a good rule of thumb, anything you might put into the merge request
+description on GitLab is probably fair game for going into the extended commit
 message as well.
 
-See [here](https://chris.beams.io/posts/git-commit/) for more details.
+See [How to Write a Git Commit Message] for more details.
 
 ## Code Review
 
@@ -70,23 +101,29 @@ changes will typically see review from several people. Be prepared to receive
 some feedback - you may be asked to make changes to your work. Our code review
 process is:
 
-1. **Triage** the pull request. Do the commit messages make sense? Is a test
+1. **Triage** the merge request. Do the commit messages make sense? Is a test
    plan necessary and/or present? Add anyone as reviewers that you think should
-   be there (using the relevant GitHub feature, if you have the permissions, or
+   be there (using the relevant GitLab feature, if you have the permissions, or
    with an @mention if necessary).
 2. **Review** the code. Look for code style violations, naming convention
    violations, buffer overflows, memory leaks, logic errors, non-portable code
    (including GNU-isms), etc. For significant changes to the public API, loop in
    a couple more people for discussion.
 3. **Execute** the test plan, if present.
-4. **Merge** the pull request when all reviewers approve.
+4. **Merge** the merge request when all reviewers approve.
 5. **File** follow-up tickets if appropriate.
+
+## Code of Conduct
+
+Note that as a project hosted on freedesktop.org, wlroots follows its
+[Code of Conduct], based on the Contributor Covenant. Please conduct yourself
+in a respectful and civilized manner when communicating with community members
+on IRC and bug tracker.
 
 ## Style Reference
 
-wlroots is written in C with a style similar to the [kernel
-style](https://www.kernel.org/doc/Documentation/process/coding-style.rst), but
-with a few notable differences.
+wlroots is written in C with a style similar to the [kernel style], but with a
+few notable differences.
 
 Try to keep your code conforming to C11 and POSIX as much as possible, and do
 not use GNU extensions.
@@ -163,7 +200,7 @@ zeroed value and exit cleanly; this simplifies error handling a lot.
 ### Error Codes
 
 For functions not returning a value, they should return a (stdbool.h) bool to
-indicated if they succeeded or not.
+indicate whether they succeeded or not.
 
 ### Macros
 
@@ -362,3 +399,11 @@ static void subsurface_handle_surface_destroy(struct wl_listener *listener,
 	subsurface_destroy(subsurface);
 }
 ```
+
+[#sway-devel on Libera Chat]: https://web.libera.chat/gamja/?channels=#sway-devel
+[linear, "recipe" style]: https://www.bitsnbites.eu/git-history-work-log-vs-recipe/
+[git-rebase.io]: https://git-rebase.io/
+[reference issues]: https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically
+[Code of Conduct]: https://www.freedesktop.org/wiki/CodeOfConduct/
+[How to Write a Git Commit Message]: https://chris.beams.io/posts/git-commit/
+[kernel style]: https://www.kernel.org/doc/Documentation/process/coding-style.rst

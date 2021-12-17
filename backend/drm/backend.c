@@ -9,7 +9,6 @@
 #include <wlr/backend/interface.h>
 #include <wlr/backend/session.h>
 #include <wlr/interfaces/wlr_output.h>
-#include <wlr/types/wlr_list.h>
 #include <wlr/util/log.h>
 #include <xf86drm.h>
 #include "backend/drm/drm.h"
@@ -23,7 +22,7 @@ struct wlr_drm_backend *get_drm_backend_from_backend(
 
 static bool backend_start(struct wlr_backend *backend) {
 	struct wlr_drm_backend *drm = get_drm_backend_from_backend(backend);
-	scan_drm_connectors(drm);
+	scan_drm_connectors(drm, NULL);
 	return true;
 }
 
@@ -33,8 +32,6 @@ static void backend_destroy(struct wlr_backend *backend) {
 	}
 
 	struct wlr_drm_backend *drm = get_drm_backend_from_backend(backend);
-
-	restore_drm_outputs(drm);
 
 	struct wlr_drm_connector *conn, *next;
 	wl_list_for_each_safe(conn, next, &drm->outputs, link) {
@@ -55,24 +52,16 @@ static void backend_destroy(struct wlr_backend *backend) {
 	wl_list_remove(&drm->dev_change.link);
 	wl_list_remove(&drm->dev_remove.link);
 
+	if (drm->parent) {
+		finish_drm_renderer(&drm->mgpu_renderer);
+	}
+
 	finish_drm_resources(drm);
-	finish_drm_renderer(&drm->renderer);
 
 	free(drm->name);
 	wlr_session_close_file(drm->session, drm->dev);
 	wl_event_source_remove(drm->drm_event);
 	free(drm);
-}
-
-static struct wlr_renderer *backend_get_renderer(
-		struct wlr_backend *backend) {
-	struct wlr_drm_backend *drm = get_drm_backend_from_backend(backend);
-
-	if (drm->parent) {
-		return drm->parent->renderer.wlr_rend;
-	} else {
-		return drm->renderer.wlr_rend;
-	}
 }
 
 static clockid_t backend_get_presentation_clock(struct wlr_backend *backend) {
@@ -90,17 +79,16 @@ static int backend_get_drm_fd(struct wlr_backend *backend) {
 	}
 }
 
-static uint32_t backend_get_buffer_caps(struct wlr_backend *backend) {
+static uint32_t drm_backend_get_buffer_caps(struct wlr_backend *backend) {
 	return WLR_BUFFER_CAP_DMABUF;
 }
 
 static const struct wlr_backend_impl backend_impl = {
 	.start = backend_start,
 	.destroy = backend_destroy,
-	.get_renderer = backend_get_renderer,
 	.get_presentation_clock = backend_get_presentation_clock,
 	.get_drm_fd = backend_get_drm_fd,
-	.get_buffer_caps = backend_get_buffer_caps,
+	.get_buffer_caps = drm_backend_get_buffer_caps,
 };
 
 bool wlr_backend_is_drm(struct wlr_backend *b) {
@@ -114,16 +102,18 @@ static void handle_session_active(struct wl_listener *listener, void *data) {
 
 	if (session->active) {
 		wlr_log(WLR_INFO, "DRM fd resumed");
-		scan_drm_connectors(drm);
+		scan_drm_connectors(drm, NULL);
 
 		struct wlr_drm_connector *conn;
 		wl_list_for_each(conn, &drm->outputs, link) {
 			struct wlr_output_mode *mode = NULL;
+			uint32_t committed = WLR_OUTPUT_STATE_ENABLED;
 			if (conn->output.enabled && conn->output.current_mode != NULL) {
+				committed |= WLR_OUTPUT_STATE_MODE;
 				mode = conn->output.current_mode;
 			}
 			struct wlr_output_state state = {
-				.committed = WLR_OUTPUT_STATE_MODE | WLR_OUTPUT_STATE_ENABLED,
+				.committed = committed,
 				.enabled = mode != NULL,
 				.mode_type = WLR_OUTPUT_STATE_MODE_FIXED,
 				.mode = mode,
@@ -137,13 +127,24 @@ static void handle_session_active(struct wl_listener *listener, void *data) {
 
 static void handle_dev_change(struct wl_listener *listener, void *data) {
 	struct wlr_drm_backend *drm = wl_container_of(listener, drm, dev_change);
+	struct wlr_device_change_event *change = data;
 
 	if (!drm->session->active) {
 		return;
 	}
 
-	wlr_log(WLR_DEBUG, "%s invalidated", drm->name);
-	scan_drm_connectors(drm);
+	switch (change->type) {
+	case WLR_DEVICE_HOTPLUG:
+		wlr_log(WLR_DEBUG, "Received hotplug event for %s", drm->name);
+		scan_drm_connectors(drm, &change->hotplug);
+		break;
+	case WLR_DEVICE_LEASE:
+		wlr_log(WLR_DEBUG, "Received lease event for %s", drm->name);
+		scan_drm_leases(drm);
+		break;
+	default:
+		wlr_log(WLR_DEBUG, "Received unknown change event for %s", drm->name);
+	}
 }
 
 static void handle_dev_remove(struct wl_listener *listener, void *data) {
@@ -216,7 +217,7 @@ struct wlr_backend *wlr_drm_backend_create(struct wl_display *display,
 
 	struct wl_event_loop *event_loop = wl_display_get_event_loop(display);
 	drm->drm_event = wl_event_loop_add_fd(event_loop, drm->fd,
-		WL_EVENT_READABLE, handle_drm_event, NULL);
+		WL_EVENT_READABLE, handle_drm_event, drm);
 	if (!drm->drm_event) {
 		wlr_log(WLR_ERROR, "Failed to create DRM event source");
 		goto error_fd;
@@ -233,20 +234,20 @@ struct wlr_backend *wlr_drm_backend_create(struct wl_display *display,
 		goto error_event;
 	}
 
-	if (!init_drm_renderer(drm, &drm->renderer)) {
-		wlr_log(WLR_ERROR, "Failed to initialize renderer");
-		goto error_event;
-	}
-
 	if (drm->parent) {
+		if (!init_drm_renderer(drm, &drm->mgpu_renderer)) {
+			wlr_log(WLR_ERROR, "Failed to initialize renderer");
+			goto error_resources;
+		}
+
 		// We'll perform a multi-GPU copy for all submitted buffers, we need
 		// to be able to texture from them
-		struct wlr_renderer *renderer = drm->renderer.wlr_rend;
+		struct wlr_renderer *renderer = drm->mgpu_renderer.wlr_rend;
 		const struct wlr_drm_format_set *texture_formats =
 			wlr_renderer_get_dmabuf_texture_formats(renderer);
 		if (texture_formats == NULL) {
 			wlr_log(WLR_ERROR, "Failed to query renderer texture formats");
-			goto error_event;
+			goto error_mgpu_renderer;
 		}
 
 		// Force a linear layout. In case explicit modifiers aren't supported,
@@ -269,10 +270,17 @@ struct wlr_backend *wlr_drm_backend_create(struct wl_display *display,
 
 	return &drm->backend;
 
+error_mgpu_renderer:
+	finish_drm_renderer(&drm->mgpu_renderer);
+error_resources:
+	finish_drm_resources(drm);
 error_event:
 	wl_list_remove(&drm->session_active.link);
 	wl_event_source_remove(drm->drm_event);
 error_fd:
+	wl_list_remove(&drm->dev_remove.link);
+	wl_list_remove(&drm->dev_change.link);
+	wl_list_remove(&drm->parent_destroy.link);
 	wlr_session_close_file(drm->session, dev);
 	free(drm);
 	return NULL;

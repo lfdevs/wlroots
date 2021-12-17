@@ -3,6 +3,14 @@ wlr_files += files(
 	'data_device/wlr_data_offer.c',
 	'data_device/wlr_data_source.c',
 	'data_device/wlr_drag.c',
+	'output/cursor.c',
+	'output/output.c',
+	'output/render.c',
+	'output/transform.c',
+	'scene/subsurface_tree.c',
+	'scene/wlr_scene.c',
+	'scene/output_layout.c',
+	'scene/xdg_shell.c',
 	'seat/wlr_seat_keyboard.c',
 	'seat/wlr_seat_pointer.c',
 	'seat/wlr_seat_touch.c',
@@ -16,11 +24,11 @@ wlr_files += files(
 	'xdg_shell/wlr_xdg_shell.c',
 	'xdg_shell/wlr_xdg_surface.c',
 	'xdg_shell/wlr_xdg_toplevel.c',
-	'wlr_box.c',
 	'wlr_buffer.c',
 	'wlr_compositor.c',
 	'wlr_cursor.c',
 	'wlr_data_control_v1.c',
+	'wlr_drm.c',
 	'wlr_export_dmabuf_v1.c',
 	'wlr_foreign_toplevel_management_v1.c',
 	'wlr_fullscreen_shell_v1.c',
@@ -35,13 +43,11 @@ wlr_files += files(
 	'wlr_keyboard_shortcuts_inhibit_v1.c',
 	'wlr_layer_shell_v1.c',
 	'wlr_linux_dmabuf_v1.c',
-	'wlr_list.c',
 	'wlr_matrix.c',
 	'wlr_output_damage.c',
 	'wlr_output_layout.c',
 	'wlr_output_management_v1.c',
 	'wlr_output_power_management_v1.c',
-	'wlr_output.c',
 	'wlr_pointer_constraints_v1.c',
 	'wlr_pointer_gestures_v1.c',
 	'wlr_pointer.c',
@@ -69,3 +75,9 @@ wlr_files += files(
 	'wlr_xdg_foreign_registry.c',
 	'wlr_xdg_output_v1.c',
 )
+
+if features.get('drm-backend')
+	wlr_files += files(
+		'wlr_drm_lease_v1.c',
+	)
+endif

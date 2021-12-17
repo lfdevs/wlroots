@@ -6,5 +6,5 @@ LIBS=$(shell pkg-config --libs wlroots)
 a.out: debian/tests/test.c
 	gcc $(CFLAGS) $< $(LIBS) -lwayland-server
 	@echo "Build test of $< succeeded"
-	WLR_BACKENDS=noop ./a.out
+	WLR_BACKENDS=headless ./a.out
 	@rm -f a.out

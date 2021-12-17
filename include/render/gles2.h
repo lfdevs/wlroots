@@ -12,6 +12,7 @@
 #include <wlr/render/interface.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/render/wlr_texture.h>
+#include <wlr/util/addon.h>
 #include <wlr/util/log.h>
 
 struct wlr_gles2_pixel_format {
@@ -23,7 +24,6 @@ struct wlr_gles2_pixel_format {
 struct wlr_gles2_tex_shader {
 	GLuint program;
 	GLint proj;
-	GLint invert_y;
 	GLint tex;
 	GLint alpha;
 	GLint pos_attrib;
@@ -39,10 +39,12 @@ struct wlr_gles2_renderer {
 
 	const char *exts_str;
 	struct {
-		bool read_format_bgra_ext;
-		bool debug_khr;
-		bool egl_image_external_oes;
-		bool egl_image_oes;
+		bool EXT_read_format_bgra;
+		bool KHR_debug;
+		bool OES_egl_image_external;
+		bool OES_egl_image;
+		bool EXT_texture_type_2_10_10_10_REV;
+		bool OES_texture_half_float_linear;
 	} exts;
 
 	struct {
@@ -82,7 +84,7 @@ struct wlr_gles2_buffer {
 	GLuint rbo;
 	GLuint fbo;
 
-	struct wl_listener buffer_destroy;
+	struct wlr_addon addon;
 };
 
 struct wlr_gles2_texture {
@@ -98,34 +100,31 @@ struct wlr_gles2_texture {
 
 	EGLImageKHR image;
 
-	bool inverted_y;
 	bool has_alpha;
 
 	// Only affects target == GL_TEXTURE_2D
 	uint32_t drm_format; // used to interpret upload data
 	// If imported from a wlr_buffer
 	struct wlr_buffer *buffer;
-
-	struct wl_listener buffer_destroy;
+	struct wlr_addon buffer_addon;
 };
 
+
+bool is_gles2_pixel_format_supported(const struct wlr_gles2_renderer *renderer,
+	const struct wlr_gles2_pixel_format *format);
 const struct wlr_gles2_pixel_format *get_gles2_format_from_drm(uint32_t fmt);
 const struct wlr_gles2_pixel_format *get_gles2_format_from_gl(
 	GLint gl_format, GLint gl_type, bool alpha);
-const uint32_t *get_gles2_shm_formats(size_t *len);
+const uint32_t *get_gles2_shm_formats(const struct wlr_gles2_renderer *renderer,
+	size_t *len);
 
 struct wlr_gles2_renderer *gles2_get_renderer(
 	struct wlr_renderer *wlr_renderer);
 struct wlr_gles2_texture *gles2_get_texture(
 	struct wlr_texture *wlr_texture);
 
-struct wlr_texture *gles2_texture_from_pixels(struct wlr_renderer *wlr_renderer,
-	uint32_t fmt, uint32_t stride, uint32_t width, uint32_t height,
-	const void *data);
 struct wlr_texture *gles2_texture_from_wl_drm(struct wlr_renderer *wlr_renderer,
 	struct wl_resource *data);
-struct wlr_texture *gles2_texture_from_dmabuf(struct wlr_renderer *wlr_renderer,
-	struct wlr_dmabuf_attributes *attribs);
 struct wlr_texture *gles2_texture_from_buffer(struct wlr_renderer *wlr_renderer,
 	struct wlr_buffer *buffer);
 void gles2_texture_destroy(struct wlr_gles2_texture *texture);

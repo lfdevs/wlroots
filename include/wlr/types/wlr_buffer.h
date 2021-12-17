@@ -12,8 +12,10 @@
 #include <pixman.h>
 #include <wayland-server-core.h>
 #include <wlr/render/dmabuf.h>
+#include <wlr/util/addon.h>
 
 struct wlr_buffer;
+struct wlr_renderer;
 
 struct wlr_shm_attributes {
 	int fd;
@@ -28,8 +30,8 @@ struct wlr_buffer_impl {
 		struct wlr_dmabuf_attributes *attribs);
 	bool (*get_shm)(struct wlr_buffer *buffer,
 		struct wlr_shm_attributes *attribs);
-	bool (*begin_data_ptr_access)(struct wlr_buffer *buffer, void **data,
-		uint32_t *format, size_t *stride);
+	bool (*begin_data_ptr_access)(struct wlr_buffer *buffer, uint32_t flags,
+		void **data, uint32_t *format, size_t *stride);
 	void (*end_data_ptr_access)(struct wlr_buffer *buffer);
 };
 
@@ -66,6 +68,14 @@ struct wlr_buffer {
 		struct wl_signal destroy;
 		struct wl_signal release;
 	} events;
+
+	struct wlr_addon_set addons;
+};
+
+struct wlr_buffer_resource_interface {
+	const char *name;
+	bool (*is_instance)(struct wl_resource *resource);
+	struct wlr_buffer *(*from_resource)(struct wl_resource *resource);
 };
 
 /**
@@ -111,6 +121,48 @@ bool wlr_buffer_get_dmabuf(struct wlr_buffer *buffer,
  */
 bool wlr_buffer_get_shm(struct wlr_buffer *buffer,
 	struct wlr_shm_attributes *attribs);
+/**
+ * Allows the registration of a wl_resource implementation.
+ *
+ * The matching function will be called for the wl_resource when creating a
+ * wlr_buffer from a wl_resource.
+ */
+void wlr_buffer_register_resource_interface(
+		const struct wlr_buffer_resource_interface *iface);
+/**
+ * Transforms a wl_resource into a wlr_buffer and locks it. Once the caller is
+ * done with the buffer, they must call wlr_buffer_unlock.
+ *
+ * The provided wl_resource must be a wl_buffer.
+ */
+struct wlr_buffer *wlr_buffer_from_resource(struct wl_resource *resource);
+
+/**
+ * Buffer data pointer access flags.
+ */
+enum wlr_buffer_data_ptr_access_flag {
+	/**
+	 * The buffer contents can be read back.
+	 */
+	WLR_BUFFER_DATA_PTR_ACCESS_READ = 1 << 0,
+	/**
+	 * The buffer contents can be written to.
+	 */
+	WLR_BUFFER_DATA_PTR_ACCESS_WRITE = 1 << 1,
+};
+
+/**
+ * Get a pointer to a region of memory referring to the buffer's underlying
+ * storage. The format and stride can be used to interpret the memory region
+ * contents.
+ *
+ * The returned pointer should be pointing to a valid memory region for the
+ * operations specified in the flags. The returned pointer is only valid up to
+ * the next buffer_end_data_ptr_access call.
+ */
+bool wlr_buffer_begin_data_ptr_access(struct wlr_buffer *buffer, uint32_t flags,
+	void **data, uint32_t *format, size_t *stride);
+void wlr_buffer_end_data_ptr_access(struct wlr_buffer *buffer);
 
 /**
  * A client buffer.
@@ -119,24 +171,29 @@ struct wlr_client_buffer {
 	struct wlr_buffer base;
 
 	/**
-	 * The buffer resource, if any. Will be NULL if the client destroys it.
-	 */
-	struct wl_resource *resource;
-	/**
-	 * Whether a release event has been sent to the resource.
-	 */
-	bool resource_released;
-	/**
 	 * The buffer's texture, if any. A buffer will not have a texture if the
 	 * client destroys the buffer before it has been released.
 	 */
 	struct wlr_texture *texture;
+	/**
+	 * The buffer this client buffer was created from. NULL if destroyed.
+	 */
+	struct wlr_buffer *source;
 
-	struct wl_listener resource_destroy;
-	struct wl_listener release;
+	// private state
+
+	struct wl_listener source_destroy;
+
+	// If the client buffer has been created from a wl_shm buffer
+	uint32_t shm_source_format;
 };
 
-struct wlr_renderer;
+/**
+ * Creates a wlr_client_buffer from a given wlr_buffer by creating a texture
+ * from it, and copying its wl_resource.
+ */
+struct wlr_client_buffer *wlr_client_buffer_create(struct wlr_buffer *buffer,
+	struct wlr_renderer *renderer);
 
 /**
  * Get a client buffer from a generic buffer. If the buffer isn't a client
@@ -148,27 +205,12 @@ struct wlr_client_buffer *wlr_client_buffer_get(struct wlr_buffer *buffer);
  */
 bool wlr_resource_is_buffer(struct wl_resource *resource);
 /**
- * Get the size of a wl_buffer resource.
- */
-bool wlr_resource_get_buffer_size(struct wl_resource *resource,
-	struct wlr_renderer *renderer, int *width, int *height);
-/**
- * Import a client buffer and lock it.
- *
- * Once the caller is done with the buffer, they must call wlr_buffer_unlock.
- */
-struct wlr_client_buffer *wlr_client_buffer_import(
-	struct wlr_renderer *renderer, struct wl_resource *resource);
-/**
- * Try to update the buffer's content. On success, returns the updated buffer
- * and destroys the provided `buffer`. On error, `buffer` is intact and NULL is
- * returned.
+ * Try to update the buffer's content.
  *
  * Fails if there's more than one reference to the buffer or if the texture
  * isn't mutable.
  */
-struct wlr_client_buffer *wlr_client_buffer_apply_damage(
-	struct wlr_client_buffer *buffer, struct wl_resource *resource,
-	pixman_region32_t *damage);
+bool wlr_client_buffer_apply_damage(struct wlr_client_buffer *client_buffer,
+	struct wlr_buffer *next, pixman_region32_t *damage);
 
 #endif

@@ -14,8 +14,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <wayland-server-core.h>
-#include <wlr/types/wlr_box.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/util/addon.h>
+#include <wlr/util/box.h>
 
 enum wlr_surface_state_field {
 	WLR_SURFACE_STATE_BUFFER = 1 << 0,
@@ -35,7 +36,7 @@ struct wlr_surface_state {
 	// overflow.
 	uint32_t seq;
 
-	struct wl_resource *buffer_resource;
+	struct wlr_buffer *buffer;
 	int32_t dx, dy; // relative to previous position
 	pixman_region32_t surface_damage, buffer_damage; // clipped to bounds
 	pixman_region32_t opaque, input;
@@ -45,6 +46,9 @@ struct wlr_surface_state {
 
 	int width, height; // in surface-local coordinates
 	int buffer_width, buffer_height;
+
+	struct wl_list subsurfaces_below;
+	struct wl_list subsurfaces_above;
 
 	/**
 	 * The viewport is applied after the surface transform and scale.
@@ -60,8 +64,6 @@ struct wlr_surface_state {
 		struct wlr_fbox src;
 		int dst_width, dst_height; // in surface-local coordinates
 	} viewport;
-
-	struct wl_listener buffer_destroy;
 
 	// Number of locks that prevent this surface state from being committed.
 	size_t cached_state_locks;
@@ -110,6 +112,11 @@ struct wlr_surface {
 	 */
 	pixman_region32_t buffer_damage;
 	/**
+	 * The last commit's damage caused by surface and its subsurfaces'
+	 * movement, in surface-local coordinates.
+	 */
+	pixman_region32_t external_damage;
+	/**
 	 * The current opaque region, in surface-local coordinates. It is clipped to
 	 * the surface bounds. If the surface's buffer is using a fully opaque
 	 * format, this is set to the whole surface.
@@ -123,10 +130,9 @@ struct wlr_surface {
 	/**
 	 * `current` contains the current, committed surface state. `pending`
 	 * accumulates state changes from the client between commits and shouldn't
-	 * be accessed by the compositor directly. `previous` contains the state of
-	 * the previous commit.
+	 * be accessed by the compositor directly.
 	 */
-	struct wlr_surface_state current, pending, previous;
+	struct wlr_surface_state current, pending;
 
 	struct wl_list cached; // wlr_surface_state.cached_link
 
@@ -139,23 +145,31 @@ struct wlr_surface {
 		struct wl_signal destroy;
 	} events;
 
-	// wlr_subsurface.parent_link
-	struct wl_list subsurfaces_below;
-	struct wl_list subsurfaces_above;
-
-	// wlr_subsurface.parent_pending_link
-	struct wl_list subsurfaces_pending_below;
-	struct wl_list subsurfaces_pending_above;
-
 	struct wl_list current_outputs; // wlr_surface_output::link
+
+	struct wlr_addon_set addons;
+	void *data;
+
+	// private state
 
 	struct wl_listener renderer_destroy;
 
-	void *data;
+	struct {
+		int32_t scale;
+		enum wl_output_transform transform;
+		int width, height;
+		int buffer_width, buffer_height;
+	} previous;
 };
 
-struct wlr_subsurface_state {
+/**
+ * The sub-surface state describing the sub-surface's relationship with its
+ * parent. Contrary to other states, this one is not applied on surface commit.
+ * Instead, it's applied on parent surface commit.
+ */
+struct wlr_subsurface_parent_state {
 	int32_t x, y;
+	struct wl_list link;
 };
 
 struct wlr_subsurface {
@@ -163,7 +177,7 @@ struct wlr_subsurface {
 	struct wlr_surface *surface;
 	struct wlr_surface *parent;
 
-	struct wlr_subsurface_state current, pending;
+	struct wlr_subsurface_parent_state current, pending;
 
 	uint32_t cached_seq;
 	bool has_cache;
@@ -171,9 +185,7 @@ struct wlr_subsurface {
 	bool synchronized;
 	bool reordered;
 	bool mapped;
-
-	struct wl_list parent_link;
-	struct wl_list parent_pending_link;
+	bool added;
 
 	struct wl_listener surface_destroy;
 	struct wl_listener parent_destroy;
@@ -214,14 +226,6 @@ bool wlr_surface_has_buffer(struct wlr_surface *surface);
 struct wlr_texture *wlr_surface_get_texture(struct wlr_surface *surface);
 
 /**
- * Create a new subsurface resource with the provided new ID. If `resource_list`
- * is non-NULL, adds the subsurface's resource to the list.
- */
-struct wlr_subsurface *wlr_subsurface_create(struct wlr_surface *surface,
-		struct wlr_surface *parent, uint32_t version, uint32_t id,
-		struct wl_list *resource_list);
-
-/**
  * Get the root of the subsurface tree for this surface. Can return NULL if
  * a surface in the tree has been destroyed.
  */
@@ -235,7 +239,8 @@ bool wlr_surface_point_accepts_input(struct wlr_surface *surface,
 		double sx, double sy);
 
 /**
- * Find a surface in this surface's tree that accepts input events at the given
+ * Find a surface in this surface's tree that accepts input events and has all
+ * parents mapped (except this surface, which can be unmapped) at the given
  * surface-local coordinates. Returns the surface and coordinates in the leaf
  * surface coordinate system or NULL if no surface is found at that location.
  */
@@ -266,17 +271,18 @@ void wlr_surface_get_extends(struct wlr_surface *surface, struct wlr_box *box);
 struct wlr_surface *wlr_surface_from_resource(struct wl_resource *resource);
 
 /**
- * Call `iterator` on each surface in the surface tree, with the surface's
- * position relative to the root surface. The function is called from root to
- * leaves (in rendering order).
+ * Call `iterator` on each mapped surface in the surface tree (whether or not
+ * this surface is mapped), with the surface's position relative to the root
+ * surface. The function is called from root to leaves (in rendering order).
  */
 void wlr_surface_for_each_surface(struct wlr_surface *surface,
 	wlr_surface_iterator_func_t iterator, void *user_data);
 
 /**
- * Get the effective damage to the surface in terms of surface local
- * coordinates. This includes damage induced by resizing and moving the
- * surface. The damage is not expected to be bounded by the surface itself.
+ * Get the effective surface damage in surface-local coordinate space. Besides
+ * buffer damage, this includes damage induced by resizing and moving the
+ * surface and its subsurfaces. The resulting damage is not expected to be
+ * bounded by the surface itself.
  */
 void wlr_surface_get_effective_damage(struct wlr_surface *surface,
 	pixman_region32_t *damage);

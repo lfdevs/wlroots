@@ -19,6 +19,12 @@
 struct wlr_xwm;
 struct wlr_xwayland_cursor;
 
+struct wlr_xwayland_server_options {
+	bool lazy;
+	bool enable_wm;
+	bool no_touch_pointer_emulation;
+};
+
 struct wlr_xwayland_server {
 	pid_t pid;
 	struct wl_client *client;
@@ -33,8 +39,7 @@ struct wlr_xwayland_server {
 	char display_name[16];
 	int x_fd[2];
 	struct wl_event_source *x_fd_read_event[2];
-	bool lazy;
-	bool enable_wm;
+	struct wlr_xwayland_server_options options;
 
 	struct wl_display *wl_display;
 
@@ -47,11 +52,6 @@ struct wlr_xwayland_server {
 	struct wl_listener display_destroy;
 
 	void *data;
-};
-
-struct wlr_xwayland_server_options {
-	bool lazy;
-	bool enable_wm;
 };
 
 struct wlr_xwayland_server_ready_event {
@@ -73,6 +73,7 @@ struct wlr_xwayland {
 	struct {
 		struct wl_signal ready;
 		struct wl_signal new_surface;
+		struct wl_signal remove_startup_info;
 	} events;
 
 	/**
@@ -160,6 +161,7 @@ struct wlr_xwayland_surface {
 	char *class;
 	char *instance;
 	char *role;
+	char *startup_id;
 	pid_t pid;
 	bool has_utf8_title;
 
@@ -206,6 +208,7 @@ struct wlr_xwayland_surface {
 		struct wl_signal set_role;
 		struct wl_signal set_parent;
 		struct wl_signal set_pid;
+		struct wl_signal set_startup_id;
 		struct wl_signal set_window_type;
 		struct wl_signal set_hints;
 		struct wl_signal set_decorations;
@@ -229,6 +232,11 @@ struct wlr_xwayland_surface_configure_event {
 // TODO: maybe add a seat to these
 struct wlr_xwayland_move_event {
 	struct wlr_xwayland_surface *surface;
+};
+
+struct wlr_xwayland_remove_startup_info_event  {
+	const char *id;
+	xcb_window_t window;
 };
 
 struct wlr_xwayland_resize_event {

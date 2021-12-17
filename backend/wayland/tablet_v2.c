@@ -336,7 +336,8 @@ static void handle_tablet_pad_path(void *data,
 	struct wlr_wl_input_device *dev = data;
 	struct wlr_tablet_pad *tablet_pad = dev->wlr_input_device.tablet_pad;
 
-	wlr_list_push(&tablet_pad->paths, strdup(path));
+	char **dst = wl_array_add(&tablet_pad->paths, sizeof(char *));
+	*dst = strdup(path);
 }
 
 static void handle_tablet_pad_buttons(void *data,
@@ -401,7 +402,7 @@ static void handle_tablet_pad_removed(void *data,
 	/* This doesn't free anything, but emits the destroy signal */
 	wlr_input_device_destroy(&dev->wlr_input_device);
 	/* This is a bit ugly, but we need to remove it from our list */
-	wl_list_remove(&dev->wlr_input_device.link);
+	wl_list_remove(&dev->link);
 
 	struct wlr_wl_tablet_pad_group *group, *it;
 	wl_list_for_each_safe(group, it, &tablet_pad->groups, group.link) {
@@ -854,7 +855,8 @@ static void handle_tablet_path(void *data, struct zwp_tablet_v2 *zwp_tablet_v2,
 	struct wlr_wl_input_device *dev = data;
 	struct wlr_tablet *tablet = dev->wlr_input_device.tablet;
 
-	wlr_list_push(&tablet->paths, strdup(path));
+	char **dst = wl_array_add(&tablet->paths, sizeof(char *));
+	*dst = strdup(path);
 }
 
 static void handle_tablet_done(void *data, struct zwp_tablet_v2 *zwp_tablet_v2) {
@@ -871,7 +873,7 @@ static void handle_tablet_removed(void *data,
 	/* This doesn't free anything, but emits the destroy signal */
 	wlr_input_device_destroy(&dev->wlr_input_device);
 	/* This is a bit ugly, but we need to remove it from our list */
-	wl_list_remove(&dev->wlr_input_device.link);
+	wl_list_remove(&dev->link);
 
 	zwp_tablet_v2_destroy(dev->resource);
 	free(dev);

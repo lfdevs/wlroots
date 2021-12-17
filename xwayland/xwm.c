@@ -60,6 +60,9 @@ const char *const atom_map[ATOM_LAST] = {
 	[TEXT] = "TEXT",
 	[TIMESTAMP] = "TIMESTAMP",
 	[DELETE] = "DELETE",
+	[NET_STARTUP_ID] = "_NET_STARTUP_ID",
+	[NET_STARTUP_INFO] = "_NET_STARTUP_INFO",
+	[NET_STARTUP_INFO_BEGIN] = "_NET_STARTUP_INFO_BEGIN",
 	[NET_WM_WINDOW_TYPE_NORMAL] = "_NET_WM_WINDOW_TYPE_NORMAL",
 	[NET_WM_WINDOW_TYPE_UTILITY] = "_NET_WM_WINDOW_TYPE_UTILITY",
 	[NET_WM_WINDOW_TYPE_TOOLTIP] = "_NET_WM_WINDOW_TYPE_TOOLTIP",
@@ -86,6 +89,14 @@ const char *const atom_map[ATOM_LAST] = {
 	[DND_ACTION_PRIVATE] = "XdndActionPrivate",
 	[NET_CLIENT_LIST] = "_NET_CLIENT_LIST",
 	[NET_CLIENT_LIST_STACKING] = "_NET_CLIENT_LIST_STACKING",
+};
+
+#define STARTUP_INFO_REMOVE_PREFIX "remove: ID="
+struct pending_startup_id {
+	char *msg;
+	size_t len;
+	xcb_window_t window;
+	struct wl_list link;
 };
 
 static const struct wlr_surface_role xwayland_surface_role;
@@ -165,6 +176,7 @@ static struct wlr_xwayland_surface *xwayland_surface_create(
 	wl_signal_init(&surface->events.set_title);
 	wl_signal_init(&surface->events.set_parent);
 	wl_signal_init(&surface->events.set_pid);
+	wl_signal_init(&surface->events.set_startup_id);
 	wl_signal_init(&surface->events.set_window_type);
 	wl_signal_init(&surface->events.set_hints);
 	wl_signal_init(&surface->events.set_decorations);
@@ -318,7 +330,6 @@ static void xwm_set_focus_window(struct wlr_xwm *xwm,
 		xwm->last_focus_seq = cookie.sequence;
 	}
 
-	wlr_xwayland_surface_restack(xsurface, NULL, XCB_STACK_MODE_ABOVE);
 	xsurface_set_net_wm_state(xsurface);
 }
 
@@ -414,6 +425,7 @@ static void xwayland_surface_destroy(
 	free(xsurface->role);
 	free(xsurface->window_type);
 	free(xsurface->protocols);
+	free(xsurface->startup_id);
 	free(xsurface->hints);
 	free(xsurface->size_hints);
 	free(xsurface);
@@ -446,6 +458,29 @@ static void read_surface_class(struct wlr_xwm *xwm,
 	}
 
 	wlr_signal_emit_safe(&surface->events.set_class, surface);
+}
+
+static void read_surface_startup_id(struct wlr_xwm *xwm,
+		struct wlr_xwayland_surface *xsurface,
+		xcb_get_property_reply_t *reply) {
+	if (reply->type != XCB_ATOM_STRING &&
+			reply->type != xwm->atoms[UTF8_STRING]) {
+		return;
+	}
+
+	size_t len = xcb_get_property_value_length(reply);
+	char *startup_id = xcb_get_property_value(reply);
+
+	free(xsurface->startup_id);
+	if (len > 0) {
+		xsurface->startup_id = strndup(startup_id, len);
+	} else {
+		xsurface->startup_id = NULL;
+	}
+
+	wlr_log(WLR_DEBUG, "XCB_ATOM_NET_STARTUP_ID: %s",
+		xsurface->startup_id ? xsurface->startup_id: "(null)");
+	wlr_signal_emit_safe(&xsurface->events.set_startup_id, xsurface);
 }
 
 static void read_surface_role(struct wlr_xwm *xwm,
@@ -791,6 +826,8 @@ static void read_surface_property(struct wlr_xwm *xwm,
 		read_surface_motif_hints(xwm, xsurface, reply);
 	} else if (property == xwm->atoms[WM_WINDOW_ROLE]) {
 		read_surface_role(xwm, xsurface, reply);
+	} else if (property == xwm->atoms[NET_STARTUP_ID]) {
+		read_surface_startup_id(xwm, xsurface, reply);
 	} else {
 		char *prop_name = xwm_get_atom_name(xwm, property);
 		wlr_log(WLR_DEBUG, "unhandled X11 property %" PRIu32 " (%s) for window %" PRIu32,
@@ -823,7 +860,7 @@ static void xwayland_surface_role_precommit(struct wlr_surface *wlr_surface) {
 	}
 
 	if (wlr_surface->pending.committed & WLR_SURFACE_STATE_BUFFER &&
-			wlr_surface->pending.buffer_resource == NULL) {
+			wlr_surface->pending.buffer == NULL) {
 		// This is a NULL commit
 		if (surface->mapped) {
 			wlr_signal_emit_safe(&surface->events.unmap, surface);
@@ -864,6 +901,7 @@ static void xwm_map_shell_surface(struct wlr_xwm *xwm,
 		xwm->atoms[WM_HINTS],
 		xwm->atoms[WM_NORMAL_HINTS],
 		xwm->atoms[MOTIF_WM_HINTS],
+		xwm->atoms[NET_STARTUP_ID],
 		xwm->atoms[NET_WM_STATE],
 		xwm->atoms[NET_WM_WINDOW_TYPE],
 		xwm->atoms[NET_WM_NAME],
@@ -1333,6 +1371,73 @@ static void xwm_handle_net_active_window_message(struct wlr_xwm *xwm,
 	wlr_signal_emit_safe(&surface->events.request_activate, surface);
 }
 
+static void pending_startup_id_destroy(struct pending_startup_id *pending) {
+	wl_list_remove(&pending->link);
+	free(pending->msg);
+	free(pending);
+}
+
+static void xwm_handle_net_startup_info_message(struct wlr_xwm *xwm,
+		xcb_client_message_event_t *ev) {
+	struct pending_startup_id *pending, *curr = NULL;
+	wl_list_for_each(pending, &xwm->pending_startup_ids, link) {
+		if (pending->window == ev->window) {
+			curr = pending;
+			break;
+		}
+	}
+
+	char *start;
+	size_t buf_len = sizeof(ev->data);
+	if (curr) {
+		curr->msg = realloc(curr->msg, curr->len + buf_len);
+		if (!curr->msg) {
+			pending_startup_id_destroy(curr);
+			return;
+		}
+		start = curr->msg + curr->len;
+		curr->len += buf_len;
+	} else {
+		curr = calloc(1, sizeof(struct pending_startup_id));
+		if (!curr)
+			return;
+		curr->window = ev->window;
+		curr->msg = malloc(buf_len);
+		if (!curr->msg) {
+			free(curr);
+			return;
+		}
+		start = curr->msg;
+		curr->len = buf_len;
+		wl_list_insert(&xwm->pending_startup_ids, &curr->link);
+	}
+
+	char *id = NULL;
+	const char *data = (const char *)ev->data.data8;
+	for (size_t i = 0; i < buf_len; i++) {
+		start[i] = data[i];
+		if (start[i] == '\0') {
+			if (strncmp(curr->msg, STARTUP_INFO_REMOVE_PREFIX,
+					strlen(STARTUP_INFO_REMOVE_PREFIX)) == 0 &&
+					strlen(curr->msg) > strlen(STARTUP_INFO_REMOVE_PREFIX)) {
+				id = curr->msg + strlen(STARTUP_INFO_REMOVE_PREFIX);
+				break;
+			} else {
+				wlr_log(WLR_ERROR, "Unhandled message '%s'\n", curr->msg);
+				pending_startup_id_destroy(curr);
+				return;
+			}
+		}
+	}
+
+	if (id) {
+		struct wlr_xwayland_remove_startup_info_event data = { id, ev->window };
+		wlr_log(WLR_DEBUG, "Got startup id: %s", id);
+		wlr_signal_emit_safe(&xwm->xwayland->events.remove_startup_info, &data);
+		pending_startup_id_destroy(curr);
+	}
+}
+
 static void xwm_handle_wm_change_state_message(struct wlr_xwm *xwm,
 		xcb_client_message_event_t *ev) {
 	struct wlr_xwayland_surface *xsurface = lookup_surface(xwm, ev->window);
@@ -1371,6 +1476,9 @@ static void xwm_handle_client_message(struct wlr_xwm *xwm,
 		xwm_handle_wm_protocols_message(xwm, ev);
 	} else if (ev->type == xwm->atoms[NET_ACTIVE_WINDOW]) {
 		xwm_handle_net_active_window_message(xwm, ev);
+	} else if (ev->type == xwm->atoms[NET_STARTUP_INFO] ||
+			ev->type == xwm->atoms[NET_STARTUP_INFO_BEGIN]) {
+		xwm_handle_net_startup_info_message(xwm, ev);
 	} else if (ev->type == xwm->atoms[WM_CHANGE_STATE]) {
 		xwm_handle_wm_change_state_message(xwm, ev);
 	} else if (!xwm_handle_selection_client_message(xwm, ev)) {
@@ -1690,6 +1798,11 @@ void xwm_destroy(struct wlr_xwm *xwm) {
 	wl_list_remove(&xwm->compositor_destroy.link);
 	xcb_disconnect(xwm->xcb_conn);
 
+	struct pending_startup_id *pending, *next;
+	wl_list_for_each_safe(pending, next, &xwm->pending_startup_ids, link) {
+		pending_startup_id_destroy(pending);
+	}
+
 	xwm->xwayland->xwm = NULL;
 	free(xwm);
 }
@@ -1930,6 +2043,7 @@ struct wlr_xwm *xwm_create(struct wlr_xwayland *xwayland, int wm_fd) {
 	wl_list_init(&xwm->surfaces);
 	wl_list_init(&xwm->surfaces_in_stack_order);
 	wl_list_init(&xwm->unpaired_surfaces);
+	wl_list_init(&xwm->pending_startup_ids);
 	xwm->ping_timeout = 10000;
 
 	xwm->xcb_conn = xcb_connect_to_fd(wm_fd, NULL);

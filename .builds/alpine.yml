@@ -2,11 +2,14 @@ image: alpine/edge
 packages:
   - eudev-dev
   - ffmpeg-dev
+  - glslang
   - libinput-dev
   - libxkbcommon-dev
   - mesa-dev
   - meson
   - pixman-dev
+  - vulkan-headers
+  - vulkan-loader-dev
   - wayland-dev
   - wayland-protocols
   - xcb-util-image-dev
@@ -15,11 +18,11 @@ packages:
   - xwayland
   - libseat-dev
 sources:
-  - https://github.com/swaywm/wlroots
+  - https://gitlab.freedesktop.org/wlroots/wlroots.git
 tasks:
   - setup: |
       cd wlroots
-      meson build --default-library=both -Dauto_features=enabled -Dlibseat=disabled -Dxcb-errors=disabled
+      meson build --fatal-meson-warnings --default-library=both -Dauto_features=enabled -Dxcb-errors=disabled
   - build: |
       cd wlroots
       ninja -C build

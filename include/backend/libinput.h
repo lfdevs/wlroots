@@ -7,7 +7,6 @@
 #include <wlr/backend/libinput.h>
 #include <wlr/interfaces/wlr_input_device.h>
 #include <wlr/types/wlr_input_device.h>
-#include <wlr/types/wlr_list.h>
 
 struct wlr_libinput_backend {
 	struct wlr_backend backend;
@@ -22,12 +21,12 @@ struct wlr_libinput_backend {
 	struct wl_listener session_destroy;
 	struct wl_listener session_signal;
 
-	struct wlr_list wlr_device_lists; // list of struct wl_list
+	struct wl_array wlr_device_lists; // struct wl_list *
 };
 
 struct wlr_libinput_input_device {
 	struct wlr_input_device wlr_input_device;
-
+	struct wl_list link;
 	struct libinput_device *handle;
 };
 
@@ -67,6 +66,10 @@ void handle_pointer_pinch_update(struct libinput_event *event,
 		struct libinput_device *device);
 void handle_pointer_pinch_end(struct libinput_event *event,
 		struct libinput_device *device);
+void handle_pointer_hold_begin(struct libinput_event *event,
+		struct libinput_device *device);
+void handle_pointer_hold_end(struct libinput_event *event,
+		struct libinput_device *device);
 
 struct wlr_switch *create_libinput_switch(
 		struct libinput_device *device);
@@ -82,6 +85,8 @@ void handle_touch_up(struct libinput_event *event,
 void handle_touch_motion(struct libinput_event *event,
 		struct libinput_device *device);
 void handle_touch_cancel(struct libinput_event *event,
+		struct libinput_device *device);
+void handle_touch_frame(struct libinput_event *event,
 		struct libinput_device *device);
 
 struct wlr_tablet *create_libinput_tablet(

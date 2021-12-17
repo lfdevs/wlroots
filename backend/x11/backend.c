@@ -29,9 +29,7 @@
 #include <wlr/interfaces/wlr_pointer.h>
 #include <wlr/util/log.h>
 
-#include "backend/backend.h"
 #include "backend/x11.h"
-#include "render/allocator.h"
 #include "render/drm_format_set.h"
 #include "util/signal.h"
 
@@ -164,6 +162,8 @@ struct wlr_x11_backend *get_x11_backend_from_backend(
 static bool backend_start(struct wlr_backend *backend) {
 	struct wlr_x11_backend *x11 = get_x11_backend_from_backend(backend);
 	x11->started = true;
+
+	wlr_log(WLR_INFO, "Starting X11 backend");
 
 	wlr_signal_emit_safe(&x11->backend.events.new_input, &x11->keyboard_dev);
 
@@ -354,6 +354,7 @@ static bool query_formats(struct wlr_x11_backend *x11) {
 			}
 
 			if (x11->have_dri3) {
+				// X11 always supports implicit modifiers
 				wlr_drm_format_set_add(&x11->dri3_formats, format->drm,
 					DRM_FORMAT_MOD_INVALID);
 				if (!query_dri3_modifiers(x11, format)) {
@@ -572,9 +573,9 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_display *display,
 		goto error_event;
 	}
 
-	x11->depth = get_depth(x11->screen, 32);
+	x11->depth = get_depth(x11->screen, 24);
 	if (!x11->depth) {
-		wlr_log(WLR_ERROR, "Failed to get 32-bit depth for X11 screen");
+		wlr_log(WLR_ERROR, "Failed to get 24-bit depth for X11 screen");
 		goto error_event;
 	}
 
@@ -608,12 +609,6 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_display *display,
 			wlr_log(WLR_ERROR, "Failed to query DRI3 DRM FD");
 			goto error_event;
 		}
-	}
-
-	struct wlr_renderer *renderer = wlr_backend_get_renderer(&x11->backend);
-	struct wlr_allocator *allocator = backend_get_allocator(&x11->backend);
-	if (renderer == NULL || allocator == NULL) {
-		goto error_event;
 	}
 
 	// Windows can only display buffers with the depth they were created with

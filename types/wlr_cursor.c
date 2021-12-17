@@ -10,6 +10,7 @@
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_tablet_tool.h>
 #include <wlr/types/wlr_touch.h>
+#include <wlr/util/box.h>
 #include <wlr/util/log.h>
 #include "util/signal.h"
 
@@ -31,11 +32,14 @@ struct wlr_cursor_device {
 	struct wl_listener pinch_begin;
 	struct wl_listener pinch_update;
 	struct wl_listener pinch_end;
+	struct wl_listener hold_begin;
+	struct wl_listener hold_end;
 
 	struct wl_listener touch_down;
 	struct wl_listener touch_up;
 	struct wl_listener touch_motion;
 	struct wl_listener touch_cancel;
+	struct wl_listener touch_frame;
 
 	struct wl_listener tablet_tool_axis;
 	struct wl_listener tablet_tool_proximity;
@@ -98,12 +102,15 @@ struct wlr_cursor *wlr_cursor_create(void) {
 	wl_signal_init(&cur->events.pinch_begin);
 	wl_signal_init(&cur->events.pinch_update);
 	wl_signal_init(&cur->events.pinch_end);
+	wl_signal_init(&cur->events.hold_begin);
+	wl_signal_init(&cur->events.hold_end);
 
 	// touch signals
 	wl_signal_init(&cur->events.touch_up);
 	wl_signal_init(&cur->events.touch_down);
 	wl_signal_init(&cur->events.touch_motion);
 	wl_signal_init(&cur->events.touch_cancel);
+	wl_signal_init(&cur->events.touch_frame);
 
 	// tablet tool signals
 	wl_signal_init(&cur->events.tablet_tool_tip);
@@ -157,11 +164,14 @@ static void cursor_device_destroy(struct wlr_cursor_device *c_device) {
 		wl_list_remove(&c_device->pinch_begin.link);
 		wl_list_remove(&c_device->pinch_update.link);
 		wl_list_remove(&c_device->pinch_end.link);
+		wl_list_remove(&c_device->hold_begin.link);
+		wl_list_remove(&c_device->hold_end.link);
 	} else if (dev->type == WLR_INPUT_DEVICE_TOUCH) {
 		wl_list_remove(&c_device->touch_down.link);
 		wl_list_remove(&c_device->touch_up.link);
 		wl_list_remove(&c_device->touch_motion.link);
 		wl_list_remove(&c_device->touch_cancel.link);
+		wl_list_remove(&c_device->touch_frame.link);
 	} else if (dev->type == WLR_INPUT_DEVICE_TABLET_TOOL) {
 		wl_list_remove(&c_device->tablet_tool_axis.link);
 		wl_list_remove(&c_device->tablet_tool_proximity.link);
@@ -484,6 +494,18 @@ static void handle_pointer_pinch_end(struct wl_listener *listener, void *data) {
 	wlr_signal_emit_safe(&device->cursor->events.pinch_end, event);
 }
 
+static void handle_pointer_hold_begin(struct wl_listener *listener, void *data) {
+	struct wlr_event_pointer_hold_begin *event = data;
+	struct wlr_cursor_device *device = wl_container_of(listener, device, hold_begin);
+	wlr_signal_emit_safe(&device->cursor->events.hold_begin, event);
+}
+
+static void handle_pointer_hold_end(struct wl_listener *listener, void *data) {
+	struct wlr_event_pointer_hold_end *event = data;
+	struct wlr_cursor_device *device = wl_container_of(listener, device, hold_end);
+	wlr_signal_emit_safe(&device->cursor->events.hold_end, event);
+}
+
 static void handle_touch_up(struct wl_listener *listener, void *data) {
 	struct wlr_event_touch_up *event = data;
 	struct wlr_cursor_device *device;
@@ -522,6 +544,12 @@ static void handle_touch_cancel(struct wl_listener *listener, void *data) {
 	struct wlr_cursor_device *device;
 	device = wl_container_of(listener, device, touch_cancel);
 	wlr_signal_emit_safe(&device->cursor->events.touch_cancel, event);
+}
+
+static void handle_touch_frame(struct wl_listener *listener, void *data) {
+	struct wlr_cursor_device *device =
+		wl_container_of(listener, device, touch_frame);
+	wlr_signal_emit_safe(&device->cursor->events.touch_frame, NULL);
 }
 
 static void handle_tablet_tool_tip(struct wl_listener *listener, void *data) {
@@ -650,6 +678,12 @@ static struct wlr_cursor_device *cursor_device_create(
 
 		wl_signal_add(&device->pointer->events.pinch_end, &c_device->pinch_end);
 		c_device->pinch_end.notify = handle_pointer_pinch_end;
+
+		wl_signal_add(&device->pointer->events.hold_begin, &c_device->hold_begin);
+		c_device->hold_begin.notify = handle_pointer_hold_begin;
+
+		wl_signal_add(&device->pointer->events.hold_end, &c_device->hold_end);
+		c_device->hold_end.notify = handle_pointer_hold_end;
 	} else if (device->type == WLR_INPUT_DEVICE_TOUCH) {
 		wl_signal_add(&device->touch->events.motion, &c_device->touch_motion);
 		c_device->touch_motion.notify = handle_touch_motion;
@@ -662,6 +696,9 @@ static struct wlr_cursor_device *cursor_device_create(
 
 		wl_signal_add(&device->touch->events.cancel, &c_device->touch_cancel);
 		c_device->touch_cancel.notify = handle_touch_cancel;
+
+		wl_signal_add(&device->touch->events.frame, &c_device->touch_frame);
+		c_device->touch_frame.notify = handle_touch_frame;
 	} else if (device->type == WLR_INPUT_DEVICE_TABLET_TOOL) {
 		wl_signal_add(&device->tablet->events.tip,
 			&c_device->tablet_tool_tip);
@@ -817,7 +854,7 @@ void wlr_cursor_map_input_to_output(struct wlr_cursor *cur,
 	struct wlr_cursor_device *c_device = get_cursor_device(cur, dev);
 	if (!c_device) {
 		wlr_log(WLR_ERROR, "Cannot map device \"%s\" to output"
-			"(not found in this cursor)", dev->name);
+			" (not found in this cursor)", dev->name);
 		return;
 	}
 

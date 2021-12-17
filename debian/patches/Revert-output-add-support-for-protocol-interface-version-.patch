@@ -1,0 +1,96 @@
+From: =?utf-8?q?Guido_G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Fri, 17 Dec 2021 14:52:57 +0100
+Subject: Revert "output: add support for protocol interface version 4"
+
+Until we have wayland 1.20
+
+This reverts commit e3fefda0235e548e4d23639adfe375edf380825c.
+---
+ meson.build           |  2 +-
+ types/output/output.c | 32 +++++---------------------------
+ 2 files changed, 6 insertions(+), 28 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index 681b07c..531b34e 100644
+--- a/meson.build
++++ b/meson.build
+@@ -99,7 +99,7 @@ internal_features = {
+ 
+ wayland_project_options = ['tests=false', 'documentation=false']
+ wayland_server = dependency('wayland-server',
+-	version: '>=1.20',
++	version: '>=1.19',
+ 	fallback: ['wayland', 'wayland_server_dep'],
+ 	default_options: wayland_project_options,
+ )
+diff --git a/types/output/output.c b/types/output/output.c
+index 85590ab..2ed8c6f 100644
+--- a/types/output/output.c
++++ b/types/output/output.c
+@@ -13,7 +13,7 @@
+ #include "util/global.h"
+ #include "util/signal.h"
+ 
+-#define OUTPUT_VERSION 4
++#define OUTPUT_VERSION 3
+ 
+ static void send_geometry(struct wl_resource *resource) {
+ 	struct wlr_output *output = wlr_output_from_resource(resource);
+@@ -43,23 +43,6 @@ static void send_scale(struct wl_resource *resource) {
+ 	}
+ }
+ 
+-static void send_name(struct wl_resource *resource) {
+-	struct wlr_output *output = wlr_output_from_resource(resource);
+-	uint32_t version = wl_resource_get_version(resource);
+-	if (version >= WL_OUTPUT_NAME_SINCE_VERSION) {
+-		wl_output_send_name(resource, output->name);
+-	}
+-}
+-
+-static void send_description(struct wl_resource *resource) {
+-	struct wlr_output *output = wlr_output_from_resource(resource);
+-	uint32_t version = wl_resource_get_version(resource);
+-	if (output->description != NULL &&
+-			version >= WL_OUTPUT_DESCRIPTION_SINCE_VERSION) {
+-		wl_output_send_description(resource, output->description);
+-	}
+-}
+-
+ static void send_done(struct wl_resource *resource) {
+ 	uint32_t version = wl_resource_get_version(resource);
+ 	if (version >= WL_OUTPUT_DONE_SINCE_VERSION) {
+@@ -104,8 +87,6 @@ static void output_bind(struct wl_client *wl_client, void *data,
+ 	send_geometry(resource);
+ 	send_current_mode(resource);
+ 	send_scale(resource);
+-	send_name(resource);
+-	send_description(resource);
+ 	send_done(resource);
+ 
+ 	struct wlr_output_event_bind evt = {
+@@ -150,7 +131,10 @@ static void schedule_done_handle_idle_timer(void *data) {
+ 
+ 	struct wl_resource *resource;
+ 	wl_resource_for_each(resource, &output->resources) {
+-		send_done(resource);
++		uint32_t version = wl_resource_get_version(resource);
++		if (version >= WL_OUTPUT_DONE_SINCE_VERSION) {
++			wl_output_send_done(resource);
++		}
+ 	}
+ }
+ 
+@@ -360,12 +344,6 @@ void wlr_output_set_description(struct wlr_output *output, const char *desc) {
+ 		output->description = NULL;
+ 	}
+ 
+-	struct wl_resource *resource;
+-	wl_resource_for_each(resource, &output->resources) {
+-		send_description(resource);
+-	}
+-	wlr_output_schedule_done(output);
+-
+ 	wlr_signal_emit_safe(&output->events.description, output);
+ }
+ 

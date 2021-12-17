@@ -1,3 +1,16 @@
+wlroots (0.15.0-1) experimental; urgency=medium
+
+  * New upstream release
+  * [bb15cc9] d/control: Bump build-deps according to meson dependencies
+  * [bf804d6] Rediff patches
+  * [c551f31] d/rules: Enable all optional backends
+  * [1d55195] Adjust to soname bump
+  * Use headless backend in tests
+  * Revert several patches so we can build against libdrm and libwayland
+    currently in Debian.
+
+ -- Guido Günther <agx@sigxcpu.org>  Fri, 17 Dec 2021 15:15:52 +0100
+
 wlroots (0.14.1-5) unstable; urgency=medium
 
   * Upload to unstable

@@ -1,5 +1,7 @@
 wlr_files += files(
+	'addon.c',
 	'array.c',
+	'box.c',
 	'global.c',
 	'log.c',
 	'region.c',

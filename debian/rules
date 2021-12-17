@@ -7,4 +7,4 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 	dh $@
 
 override_dh_auto_configure:
-	dh_auto_configure -- -Dx11-backend=enabled
+	dh_auto_configure -- -Dbackends=drm,libinput,x11

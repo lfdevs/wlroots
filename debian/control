@@ -7,7 +7,7 @@ Build-Depends:
  libavformat-dev,
  libavcodec-dev,
  libcap-dev,
- libdrm-dev (>= 2.4.95),
+ libdrm-dev (>= 2.4.105),
  libegl1-mesa-dev,
  libgbm-dev (>= 17.1.0),
  libgles2-mesa-dev,
@@ -47,13 +47,13 @@ Architecture: any
 Multi-Arch: same
 Depends:
  ${misc:Depends},
- libwlroots9 (= ${binary:Version}),
+ libwlroots10 (= ${binary:Version}),
  libcap-dev,
  libdrm-dev,
  libegl1-mesa-dev,
  libgbm-dev (>= 17.1.0),
  libgles2-mesa-dev,
- libinput-dev (>= 1.7.0),
+ libinput-dev (>= 1.14.0),
  libpixman-1-dev,
  libseat-dev,
  libsystemd-dev,
@@ -78,7 +78,7 @@ Description: Modular wayland compositor library - development headers
  .
  This package contains the development headers.
 
-Package: libwlroots9
+Package: libwlroots10
 Architecture: any
 Multi-Arch: same
 Depends:

@@ -131,6 +131,10 @@ static void xdg_touch_grab_enter(struct wlr_seat_touch_grab *grab,
 		uint32_t time, struct wlr_touch_point *point) {
 }
 
+static void xdg_touch_grab_frame(struct wlr_seat_touch_grab *grab) {
+	wlr_seat_touch_send_frame(grab->seat);
+}
+
 static void xdg_touch_grab_cancel(struct wlr_seat_touch_grab *grab) {
 	wlr_seat_touch_end_grab(grab->seat);
 }
@@ -140,6 +144,7 @@ static const struct wlr_touch_grab_interface xdg_touch_grab_impl = {
 	.up = xdg_touch_grab_up,
 	.motion = xdg_touch_grab_motion,
 	.enter = xdg_touch_grab_enter,
+	.frame = xdg_touch_grab_frame,
 	.cancel = xdg_touch_grab_cancel
 };
 
@@ -191,6 +196,21 @@ struct wlr_xdg_popup_grab *get_xdg_shell_popup_grab_from_seat(
 	return xdg_grab;
 }
 
+void handle_xdg_surface_popup_committed(struct wlr_xdg_surface *surface) {
+	assert(surface->role == WLR_XDG_SURFACE_ROLE_POPUP);
+
+	if (!surface->popup->parent) {
+		wl_resource_post_error(surface->resource,
+			XDG_SURFACE_ERROR_NOT_CONSTRUCTED,
+			"xdg_popup has no parent");
+		return;
+	}
+
+	if (!surface->popup->committed) {
+		wlr_xdg_surface_schedule_configure(surface);
+		surface->popup->committed = true;
+	}
+}
 
 static const struct xdg_popup_interface xdg_popup_implementation;
 
@@ -388,8 +408,8 @@ void wlr_xdg_popup_get_toplevel_coords(struct wlr_xdg_popup *popup,
 			popup_sy += xdg_surface->popup->geometry.y;
 			parent = xdg_surface->popup->parent;
 		} else {
-			popup_sx += xdg_surface->geometry.x;
-			popup_sy += xdg_surface->geometry.y;
+			popup_sx += xdg_surface->current.geometry.x;
+			popup_sy += xdg_surface->current.geometry.y;
 			break;
 		}
 	}

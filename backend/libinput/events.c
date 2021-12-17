@@ -7,6 +7,7 @@
 #include <wlr/interfaces/wlr_input_device.h>
 #include <wlr/util/log.h>
 #include "backend/libinput.h"
+#include "util/array.h"
 #include "util/signal.h"
 
 static struct wlr_libinput_input_device *get_libinput_device_from_device(
@@ -22,10 +23,10 @@ struct wlr_input_device *get_appropriate_device(
 	if (!wlr_devices) {
 		return NULL;
 	}
-	struct wlr_input_device *dev;
+	struct wlr_libinput_input_device *dev;
 	wl_list_for_each(dev, wlr_devices, link) {
-		if (dev->type == desired_type) {
-			return dev;
+		if (dev->wlr_input_device.type == desired_type) {
+			return &dev->wlr_input_device;
 		}
 	}
 	return NULL;
@@ -35,7 +36,7 @@ static void input_device_destroy(struct wlr_input_device *wlr_dev) {
 	struct wlr_libinput_input_device *dev =
 		get_libinput_device_from_device(wlr_dev);
 	libinput_device_unref(dev->handle);
-	wl_list_remove(&dev->wlr_input_device.link);
+	wl_list_remove(&dev->link);
 	free(dev);
 }
 
@@ -62,7 +63,7 @@ static struct wlr_input_device *allocate_device(
 	if (output_name != NULL) {
 		wlr_dev->output_name = strdup(output_name);
 	}
-	wl_list_insert(wlr_devices, &wlr_dev->link);
+	wl_list_insert(wlr_devices, &dev->link);
 	dev->handle = libinput_dev;
 	libinput_device_ref(libinput_dev);
 	wlr_input_device_init(wlr_dev, type, &input_device_impl,
@@ -183,8 +184,13 @@ static void handle_device_added(struct wlr_libinput_backend *backend,
 	}
 
 	if (!wl_list_empty(wlr_devices)) {
+		struct wl_list **dst = wl_array_add(&backend->wlr_device_lists, sizeof(wlr_devices));
+		if (!dst) {
+			goto fail;
+		}
+		*dst = wlr_devices;
+
 		libinput_device_set_user_data(libinput_dev, wlr_devices);
-		wlr_list_push(&backend->wlr_device_lists, wlr_devices);
 	} else {
 		free(wlr_devices);
 	}
@@ -192,7 +198,7 @@ static void handle_device_added(struct wlr_libinput_backend *backend,
 
 fail:
 	wlr_log(WLR_ERROR, "Could not allocate new device");
-	struct wlr_input_device *dev, *tmp_dev;
+	struct wlr_libinput_input_device *dev, *tmp_dev;
 	wl_list_for_each_safe(dev, tmp_dev, wlr_devices, link) {
 		free(dev);
 	}
@@ -209,15 +215,20 @@ static void handle_device_removed(struct wlr_libinput_backend *backend,
 	if (!wlr_devices) {
 		return;
 	}
-	struct wlr_input_device *dev, *tmp_dev;
+	struct wlr_libinput_input_device *dev, *tmp_dev;
 	wl_list_for_each_safe(dev, tmp_dev, wlr_devices, link) {
-		wlr_input_device_destroy(dev);
+		wlr_input_device_destroy(&dev->wlr_input_device);
 	}
-	for (size_t i = 0; i < backend->wlr_device_lists.length; i++) {
-		if (backend->wlr_device_lists.items[i] == wlr_devices) {
-			wlr_list_del(&backend->wlr_device_lists, i);
+	size_t i = 0;
+	struct wl_list **ptr;
+	wl_array_for_each(ptr, &backend->wlr_device_lists) {
+		struct wl_list *iter = *ptr;
+		if (iter == wlr_devices) {
+			array_remove_at(&backend->wlr_device_lists,
+				i * sizeof(struct wl_list *), sizeof(struct wl_list *));
 			break;
 		}
+		i++;
 	}
 	free(wlr_devices);
 }
@@ -261,7 +272,7 @@ void handle_libinput_event(struct wlr_libinput_backend *backend,
 		handle_touch_cancel(event, libinput_dev);
 		break;
 	case LIBINPUT_EVENT_TOUCH_FRAME:
-		// no-op (at least for now)
+		handle_touch_frame(event, libinput_dev);
 		break;
 	case LIBINPUT_EVENT_TABLET_TOOL_AXIS:
 		handle_tablet_tool_axis(event, libinput_dev);
@@ -305,6 +316,14 @@ void handle_libinput_event(struct wlr_libinput_backend *backend,
 	case LIBINPUT_EVENT_GESTURE_PINCH_END:
 		handle_pointer_pinch_end(event, libinput_dev);
 		break;
+#if LIBINPUT_HAS_HOLD_GESTURES
+	case LIBINPUT_EVENT_GESTURE_HOLD_BEGIN:
+		handle_pointer_hold_begin(event, libinput_dev);
+		break;
+	case LIBINPUT_EVENT_GESTURE_HOLD_END:
+		handle_pointer_hold_end(event, libinput_dev);
+		break;
+#endif
 	default:
 		wlr_log(WLR_DEBUG, "Unknown libinput event %d", event_type);
 		break;

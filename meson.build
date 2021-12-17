@@ -1,9 +1,9 @@
 project(
 	'wlroots',
 	'c',
-	version: '0.14.1',
+	version: '0.15.0',
 	license: 'MIT',
-	meson_version: '>=0.56.0',
+	meson_version: '>=0.58.1',
 	default_options: [
 		'c_std=c11',
 		'warning_level=2',
@@ -15,7 +15,7 @@ project(
 # necessary for bugfix releases. Increasing soversion is required because
 # wlroots never guarantees ABI stability -- only API stability is guaranteed
 # between minor releases.
-soversion = 9
+soversion = 10
 
 little_endian = host_machine.endian() == 'little'
 big_endian = host_machine.endian() == 'big'
@@ -50,7 +50,7 @@ add_project_arguments(cc.get_supported_arguments([
 
 # Compute the relative path used by compiler invocations.
 source_root = meson.current_source_dir().split('/')
-build_root = meson.build_root().split('/')
+build_root = meson.global_build_root().split('/')
 relative_dir_parts = []
 i = 0
 in_prefix = true
@@ -86,19 +86,46 @@ else
 endif
 
 features = {
+	'drm-backend': false,
 	'x11-backend': false,
+	'libinput-backend': false,
 	'xwayland': false,
 	'gles2-renderer': false,
+	'vulkan-renderer': false,
 }
 internal_features = {
 	'xcb-errors': false,
 }
 
-wayland_server = dependency('wayland-server', version: '>=1.19')
-wayland_client = dependency('wayland-client')
-drm = dependency('libdrm', version: '>=2.4.105')
+wayland_project_options = ['tests=false', 'documentation=false']
+wayland_server = dependency('wayland-server',
+	version: '>=1.20',
+	fallback: ['wayland', 'wayland_server_dep'],
+	default_options: wayland_project_options,
+)
+
+drm = dependency('libdrm',
+	version: '>=2.4.109',
+	fallback: ['libdrm', 'ext_libdrm'],
+	default_options: [
+		'libkms=false',
+		'intel=false',
+		'radeon=false',
+		'amdgpu=false',
+		'nouveau=false',
+		'vmwgfx=false',
+		'omap=false',
+		'exynos=false',
+		'freedreno=false',
+		'tegra=false',
+		'vc4=false',
+		'etnaviv=false',
+		'cairo-tests=false',
+		'man-pages=false',
+		'valgrind=false',
+	],
+)
 gbm = dependency('gbm', version: '>=17.1.0')
-libinput = dependency('libinput', version: '>=1.14.0')
 xkbcommon = dependency('xkbcommon')
 udev = dependency('libudev')
 pixman = dependency('pixman-1')
@@ -108,10 +135,8 @@ rt = cc.find_library('rt')
 wlr_files = []
 wlr_deps = [
 	wayland_server,
-	wayland_client,
 	drm,
 	gbm,
-	libinput,
 	xkbcommon,
 	udev,
 	pixman,
@@ -137,7 +162,7 @@ foreach name, have : internal_features
 	)
 endforeach
 
-wlr_inc = include_directories('.', 'include')
+wlr_inc = include_directories('include')
 proto_inc = include_directories('protocol')
 
 symbols_file = 'wlroots.syms'
@@ -170,6 +195,7 @@ summary(features + internal_features, bool_yn: true)
 
 if get_option('examples')
 	subdir('examples')
+	subdir('tinywl')
 endif
 
 pkgconfig = import('pkgconfig')

@@ -10,6 +10,7 @@
 #include <wlr/util/log.h>
 #include <wlr/util/region.h>
 #include <xf86drm.h>
+#include "render/egl.h"
 
 static enum wlr_log_importance egl_log_importance_to_wlr(EGLint type) {
 	switch (type) {
@@ -118,11 +119,19 @@ static void init_dmabuf_formats(struct wlr_egl *egl) {
 
 		has_modifiers = has_modifiers || modifiers_len > 0;
 
+		// EGL always supports implicit modifiers
+		wlr_drm_format_set_add(&egl->dmabuf_texture_formats, fmt,
+			DRM_FORMAT_MOD_INVALID);
+		wlr_drm_format_set_add(&egl->dmabuf_render_formats, fmt,
+			DRM_FORMAT_MOD_INVALID);
+
 		if (modifiers_len == 0) {
+			// Asume the linear layout is supported if the driver doesn't
+			// explicitly say otherwise
 			wlr_drm_format_set_add(&egl->dmabuf_texture_formats, fmt,
-				DRM_FORMAT_MOD_INVALID);
+				DRM_FORMAT_MOD_LINEAR);
 			wlr_drm_format_set_add(&egl->dmabuf_render_formats, fmt,
-				DRM_FORMAT_MOD_INVALID);
+				DRM_FORMAT_MOD_LINEAR);
 		}
 
 		for (int j = 0; j < modifiers_len; j++) {
@@ -151,17 +160,13 @@ static void init_dmabuf_formats(struct wlr_egl *egl) {
 		has_modifiers ? "supported" : "unsupported");
 	free(str_formats);
 
+	egl->has_modifiers = has_modifiers;
+
 out:
 	free(formats);
 }
 
-struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
-	struct wlr_egl *egl = calloc(1, sizeof(struct wlr_egl));
-	if (egl == NULL) {
-		wlr_log_errno(WLR_ERROR, "Allocation failed");
-		return NULL;
-	}
-
+static struct wlr_egl *egl_create(void) {
 	const char *client_exts_str = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
 	if (client_exts_str == NULL) {
 		if (eglGetError() == EGL_BAD_DISPLAY) {
@@ -172,19 +177,39 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 		return NULL;
 	}
 
-	if (platform == EGL_PLATFORM_GBM_KHR) {
-		if (!check_egl_ext(client_exts_str, "EGL_KHR_platform_gbm")) {
-			wlr_log(WLR_ERROR, "EGL_KHR_platform_gbm not supported");
-			return NULL;
-		}
-	}
+	wlr_log(WLR_INFO, "Supported EGL client extensions: %s", client_exts_str);
 
 	if (!check_egl_ext(client_exts_str, "EGL_EXT_platform_base")) {
 		wlr_log(WLR_ERROR, "EGL_EXT_platform_base not supported");
 		return NULL;
 	}
+
+	struct wlr_egl *egl = calloc(1, sizeof(struct wlr_egl));
+	if (egl == NULL) {
+		wlr_log_errno(WLR_ERROR, "Allocation failed");
+		return NULL;
+	}
+
 	load_egl_proc(&egl->procs.eglGetPlatformDisplayEXT,
 		"eglGetPlatformDisplayEXT");
+
+	egl->exts.KHR_platform_gbm = check_egl_ext(client_exts_str,
+			"EGL_KHR_platform_gbm");
+
+	egl->exts.EXT_platform_device = check_egl_ext(client_exts_str,
+			"EGL_EXT_platform_device");
+
+	if (check_egl_ext(client_exts_str, "EGL_EXT_device_base") || check_egl_ext(client_exts_str, "EGL_EXT_device_enumeration")) {
+		load_egl_proc(&egl->procs.eglQueryDevicesEXT, "eglQueryDevicesEXT");
+	}
+
+	if (check_egl_ext(client_exts_str, "EGL_EXT_device_base") || check_egl_ext(client_exts_str, "EGL_EXT_device_query")) {
+		egl->exts.EXT_device_query = true;
+		load_egl_proc(&egl->procs.eglQueryDeviceStringEXT,
+			"eglQueryDeviceStringEXT");
+		load_egl_proc(&egl->procs.eglQueryDisplayAttribEXT,
+			"eglQueryDisplayAttribEXT");
+	}
 
 	if (check_egl_ext(client_exts_str, "EGL_KHR_debug")) {
 		load_egl_proc(&egl->procs.eglDebugMessageControlKHR,
@@ -202,67 +227,52 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 
 	if (eglBindAPI(EGL_OPENGL_ES_API) == EGL_FALSE) {
 		wlr_log(WLR_ERROR, "Failed to bind to the OpenGL ES API");
-		goto error;
+		free(egl);
+		return NULL;
 	}
 
-	egl->display = egl->procs.eglGetPlatformDisplayEXT(platform,
-		remote_display, NULL);
-	if (egl->display == EGL_NO_DISPLAY) {
-		wlr_log(WLR_ERROR, "Failed to create EGL display");
-		goto error;
-	}
+	return egl;
+}
+
+static bool egl_init_display(struct wlr_egl *egl, EGLDisplay *display) {
+	egl->display = display;
 
 	EGLint major, minor;
 	if (eglInitialize(egl->display, &major, &minor) == EGL_FALSE) {
 		wlr_log(WLR_ERROR, "Failed to initialize EGL");
-		goto error;
+		return false;
 	}
 
 	const char *display_exts_str = eglQueryString(egl->display, EGL_EXTENSIONS);
 	if (display_exts_str == NULL) {
 		wlr_log(WLR_ERROR, "Failed to query EGL display extensions");
-		return NULL;
+		return false;
 	}
 
 	if (check_egl_ext(display_exts_str, "EGL_KHR_image_base")) {
-		egl->exts.image_base_khr = true;
+		egl->exts.KHR_image_base = true;
 		load_egl_proc(&egl->procs.eglCreateImageKHR, "eglCreateImageKHR");
 		load_egl_proc(&egl->procs.eglDestroyImageKHR, "eglDestroyImageKHR");
 	}
 
-	egl->exts.image_dmabuf_import_ext =
+	egl->exts.EXT_image_dma_buf_import =
 		check_egl_ext(display_exts_str, "EGL_EXT_image_dma_buf_import");
 	if (check_egl_ext(display_exts_str,
 			"EGL_EXT_image_dma_buf_import_modifiers")) {
-		egl->exts.image_dmabuf_import_modifiers_ext = true;
+		egl->exts.EXT_image_dma_buf_import_modifiers = true;
 		load_egl_proc(&egl->procs.eglQueryDmaBufFormatsEXT,
 			"eglQueryDmaBufFormatsEXT");
 		load_egl_proc(&egl->procs.eglQueryDmaBufModifiersEXT,
 			"eglQueryDmaBufModifiersEXT");
 	}
 
-	if (check_egl_ext(display_exts_str, "EGL_WL_bind_wayland_display")) {
-		egl->exts.bind_wayland_display_wl = true;
-		load_egl_proc(&egl->procs.eglBindWaylandDisplayWL,
-			"eglBindWaylandDisplayWL");
-		load_egl_proc(&egl->procs.eglUnbindWaylandDisplayWL,
-			"eglUnbindWaylandDisplayWL");
-		load_egl_proc(&egl->procs.eglQueryWaylandBufferWL,
-			"eglQueryWaylandBufferWL");
-	}
-
 	const char *device_exts_str = NULL, *driver_name = NULL;
-	if (check_egl_ext(client_exts_str, "EGL_EXT_device_query")) {
-		load_egl_proc(&egl->procs.eglQueryDisplayAttribEXT,
-			"eglQueryDisplayAttribEXT");
-		load_egl_proc(&egl->procs.eglQueryDeviceStringEXT,
-			"eglQueryDeviceStringEXT");
-
+	if (egl->exts.EXT_device_query) {
 		EGLAttrib device_attrib;
 		if (!egl->procs.eglQueryDisplayAttribEXT(egl->display,
 				EGL_DEVICE_EXT, &device_attrib)) {
 			wlr_log(WLR_ERROR, "eglQueryDisplayAttribEXT(EGL_DEVICE_EXT) failed");
-			goto error;
+			return false;
 		}
 		egl->device = (EGLDeviceEXT)device_attrib;
 
@@ -270,7 +280,7 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 			egl->procs.eglQueryDeviceStringEXT(egl->device, EGL_EXTENSIONS);
 		if (device_exts_str == NULL) {
 			wlr_log(WLR_ERROR, "eglQueryDeviceStringEXT(EGL_EXTENSIONS) failed");
-			goto error;
+			return false;
 		}
 
 		if (check_egl_ext(device_exts_str, "EGL_MESA_device_software")) {
@@ -281,7 +291,7 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 				wlr_log(WLR_ERROR, "Software rendering detected, please use "
 					"the WLR_RENDERER_ALLOW_SOFTWARE environment variable "
 					"to proceed");
-				goto error;
+				return false;
 			}
 		}
 
@@ -292,25 +302,28 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 		}
 #endif
 
-		egl->exts.device_drm_ext =
+		egl->exts.EXT_device_drm =
 			check_egl_ext(device_exts_str, "EGL_EXT_device_drm");
+		egl->exts.EXT_device_drm_render_node =
+			check_egl_ext(device_exts_str, "EGL_EXT_device_drm_render_node");
 	}
 
 	if (!check_egl_ext(display_exts_str, "EGL_KHR_no_config_context") &&
 			!check_egl_ext(display_exts_str, "EGL_MESA_configless_context")) {
 		wlr_log(WLR_ERROR, "EGL_KHR_no_config_context or "
 			"EGL_MESA_configless_context not supported");
-		goto error;
+		return false;
 	}
 
 	if (!check_egl_ext(display_exts_str, "EGL_KHR_surfaceless_context")) {
-		wlr_log(WLR_ERROR,
-			"EGL_KHR_surfaceless_context not supported");
-		goto error;
+		wlr_log(WLR_ERROR, "EGL_KHR_surfaceless_context not supported");
+		return false;
 	}
 
+	egl->exts.IMG_context_priority =
+		check_egl_ext(display_exts_str, "EGL_IMG_context_priority");
+
 	wlr_log(WLR_INFO, "Using EGL %d.%d", (int)major, (int)minor);
-	wlr_log(WLR_INFO, "Supported EGL client extensions: %s", client_exts_str);
 	wlr_log(WLR_INFO, "Supported EGL display extensions: %s", display_exts_str);
 	if (device_exts_str != NULL) {
 		wlr_log(WLR_INFO, "Supported EGL device extensions: %s", device_exts_str);
@@ -322,8 +335,22 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 
 	init_dmabuf_formats(egl);
 
-	bool ext_context_priority =
-		check_egl_ext(display_exts_str, "EGL_IMG_context_priority");
+	return true;
+}
+
+static bool egl_init(struct wlr_egl *egl, EGLenum platform,
+		void *remote_display) {
+	EGLDisplay display = egl->procs.eglGetPlatformDisplayEXT(platform,
+		remote_display, NULL);
+	if (display == EGL_NO_DISPLAY) {
+		wlr_log(WLR_ERROR, "Failed to create EGL display");
+		return false;
+	}
+
+	if (!egl_init_display(egl, display)) {
+		eglTerminate(display);
+		return false;
+	}
 
 	size_t atti = 0;
 	EGLint attribs[5];
@@ -332,7 +359,7 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 
 	// Request a high priority context if possible
 	// TODO: only do this if we're running as the DRM master
-	bool request_high_priority = ext_context_priority;
+	bool request_high_priority = egl->exts.IMG_context_priority;
 
 	// Try to reschedule all of our rendering to be completed first. If it
 	// fails, it will fallback to the default priority (MEDIUM).
@@ -348,7 +375,7 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 		EGL_NO_CONTEXT, attribs);
 	if (egl->context == EGL_NO_CONTEXT) {
 		wlr_log(WLR_ERROR, "Failed to create EGL context");
-		goto error;
+		return false;
 	}
 
 	if (request_high_priority) {
@@ -362,15 +389,174 @@ struct wlr_egl *wlr_egl_create(EGLenum platform, void *remote_display) {
 		}
 	}
 
-	return egl;
+	return true;
+}
+
+static bool device_has_name(const drmDevice *device, const char *name);
+
+static EGLDeviceEXT get_egl_device_from_drm_fd(struct wlr_egl *egl,
+		int drm_fd) {
+	if (egl->procs.eglQueryDevicesEXT == NULL) {
+		wlr_log(WLR_DEBUG, "EGL_EXT_device_enumeration not supported");
+		return EGL_NO_DEVICE_EXT;
+	}
+
+	EGLint nb_devices = 0;
+	if (!egl->procs.eglQueryDevicesEXT(0, NULL, &nb_devices)) {
+		wlr_log(WLR_ERROR, "Failed to query EGL devices");
+		return EGL_NO_DEVICE_EXT;
+	}
+
+	EGLDeviceEXT *devices = calloc(nb_devices, sizeof(EGLDeviceEXT));
+	if (devices == NULL) {
+		wlr_log_errno(WLR_ERROR, "Failed to allocate EGL device list");
+		return EGL_NO_DEVICE_EXT;
+	}
+
+	if (!egl->procs.eglQueryDevicesEXT(nb_devices, devices, &nb_devices)) {
+		wlr_log(WLR_ERROR, "Failed to query EGL devices");
+		return EGL_NO_DEVICE_EXT;
+	}
+
+	drmDevice *device = NULL;
+	int ret = drmGetDevice(drm_fd, &device);
+	if (ret < 0) {
+		wlr_log(WLR_ERROR, "Failed to get DRM device: %s", strerror(-ret));
+		return EGL_NO_DEVICE_EXT;
+	}
+
+	EGLDeviceEXT egl_device = NULL;
+	for (int i = 0; i < nb_devices; i++) {
+		const char *egl_device_name = egl->procs.eglQueryDeviceStringEXT(
+				devices[i], EGL_DRM_DEVICE_FILE_EXT);
+		if (egl_device_name == NULL) {
+			continue;
+		}
+
+		if (device_has_name(device, egl_device_name)) {
+			wlr_log(WLR_DEBUG, "Using EGL device %s", egl_device_name);
+			egl_device = devices[i];
+			break;
+		}
+	}
+
+	free(devices);
+
+	return egl_device;
+}
+
+static int open_render_node(int drm_fd) {
+	char *render_name = drmGetRenderDeviceNameFromFd(drm_fd);
+	if (render_name == NULL) {
+		// This can happen on split render/display platforms, fallback to
+		// primary node
+		render_name = drmGetPrimaryDeviceNameFromFd(drm_fd);
+		if (render_name == NULL) {
+			wlr_log_errno(WLR_ERROR, "drmGetPrimaryDeviceNameFromFd failed");
+			return -1;
+		}
+		wlr_log(WLR_DEBUG, "DRM device '%s' has no render node, "
+			"falling back to primary node", render_name);
+	}
+
+	int render_fd = open(render_name, O_RDWR | O_CLOEXEC);
+	if (render_fd < 0) {
+		wlr_log_errno(WLR_ERROR, "Failed to open DRM node '%s'", render_name);
+	}
+	free(render_name);
+	return render_fd;
+}
+
+struct wlr_egl *wlr_egl_create_with_drm_fd(int drm_fd) {
+	struct wlr_egl *egl = egl_create();
+	if (egl == NULL) {
+		wlr_log(WLR_ERROR, "Failed to create EGL context");
+		return NULL;
+	}
+
+	if (egl->exts.EXT_platform_device) {
+		/*
+		 * Search for the EGL device matching the DRM fd using the
+		 * EXT_device_enumeration extension.
+		 */
+		EGLDeviceEXT egl_device = get_egl_device_from_drm_fd(egl, drm_fd);
+		if (egl_device != EGL_NO_DEVICE_EXT) {
+			if (egl_init(egl, EGL_PLATFORM_DEVICE_EXT, egl_device)) {
+				wlr_log(WLR_DEBUG, "Using EGL_PLATFORM_DEVICE_EXT");
+				return egl;
+			}
+			goto error;
+		}
+		/* Falls back on GBM in case the device was not found */
+	} else {
+		wlr_log(WLR_DEBUG, "EXT_platform_device not supported");
+	}
+
+	if (egl->exts.KHR_platform_gbm) {
+		int gbm_fd = open_render_node(drm_fd);
+		if (gbm_fd < 0) {
+			wlr_log(WLR_ERROR, "Failed to open DRM render node");
+			goto error;
+		}
+
+		egl->gbm_device = gbm_create_device(gbm_fd);
+		if (!egl->gbm_device) {
+			close(gbm_fd);
+			wlr_log(WLR_ERROR, "Failed to create GBM device");
+			goto error;
+		}
+
+		if (egl_init(egl, EGL_PLATFORM_GBM_KHR, egl->gbm_device)) {
+			wlr_log(WLR_DEBUG, "Using EGL_PLATFORM_GBM_KHR");
+			return egl;
+		}
+
+		gbm_device_destroy(egl->gbm_device);
+		close(gbm_fd);
+	} else {
+		wlr_log(WLR_DEBUG, "KHR_platform_gbm not supported");
+	}
 
 error:
-	eglMakeCurrent(EGL_NO_DISPLAY, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+	wlr_log(WLR_ERROR, "Failed to initialize EGL context");
 	if (egl->display) {
+		eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+			EGL_NO_CONTEXT);
 		eglTerminate(egl->display);
 	}
+	free(egl);
 	eglReleaseThread();
 	return NULL;
+}
+
+struct wlr_egl *wlr_egl_create_with_context(EGLDisplay display,
+		EGLContext context) {
+	EGLint client_type;
+	if (!eglQueryContext(display, context, EGL_CONTEXT_CLIENT_TYPE, &client_type) ||
+			client_type != EGL_OPENGL_ES_API) {
+		wlr_log(WLR_ERROR, "Unsupported EGL context client type (need OpenGL ES)");
+		return NULL;
+	}
+
+	EGLint client_version;
+	if (!eglQueryContext(display, context, EGL_CONTEXT_CLIENT_VERSION, &client_version) ||
+			client_version < 2) {
+		wlr_log(WLR_ERROR, "Unsupported EGL context client version (need OpenGL ES >= 2)");
+		return NULL;
+	}
+
+	struct wlr_egl *egl = egl_create();
+	if (egl == NULL) {
+		return NULL;
+	}
+
+	if (!egl_init_display(egl, display)) {
+		return NULL;
+	}
+
+	egl->context = context;
+
+	return egl;
 }
 
 void wlr_egl_destroy(struct wlr_egl *egl) {
@@ -382,37 +568,22 @@ void wlr_egl_destroy(struct wlr_egl *egl) {
 	wlr_drm_format_set_finish(&egl->dmabuf_texture_formats);
 
 	eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-	if (egl->wl_display) {
-		assert(egl->exts.bind_wayland_display_wl);
-		egl->procs.eglUnbindWaylandDisplayWL(egl->display, egl->wl_display);
-	}
 
 	eglDestroyContext(egl->display, egl->context);
 	eglTerminate(egl->display);
 	eglReleaseThread();
 
 	if (egl->gbm_device) {
+		int gbm_fd = gbm_device_get_fd(egl->gbm_device);
 		gbm_device_destroy(egl->gbm_device);
+		close(gbm_fd);
 	}
 
 	free(egl);
 }
 
-bool wlr_egl_bind_display(struct wlr_egl *egl, struct wl_display *local_display) {
-	if (!egl->exts.bind_wayland_display_wl) {
-		return false;
-	}
-
-	if (egl->procs.eglBindWaylandDisplayWL(egl->display, local_display)) {
-		egl->wl_display = local_display;
-		return true;
-	}
-
-	return false;
-}
-
 bool wlr_egl_destroy_image(struct wlr_egl *egl, EGLImage image) {
-	if (!egl->exts.image_base_khr) {
+	if (!egl->exts.KHR_image_base) {
 		return false;
 	}
 	if (!image) {
@@ -468,57 +639,18 @@ bool wlr_egl_restore_context(struct wlr_egl_context *context) {
 			context->read_surface, context->context);
 }
 
-EGLImageKHR wlr_egl_create_image_from_wl_drm(struct wlr_egl *egl,
-		struct wl_resource *data, EGLint *fmt, int *width, int *height,
-		bool *inverted_y) {
-	if (!egl->exts.bind_wayland_display_wl || !egl->exts.image_base_khr) {
-		return NULL;
-	}
-
-	if (!egl->procs.eglQueryWaylandBufferWL(egl->display, data,
-			EGL_TEXTURE_FORMAT, fmt)) {
-		return NULL;
-	}
-
-	egl->procs.eglQueryWaylandBufferWL(egl->display, data, EGL_WIDTH, width);
-	egl->procs.eglQueryWaylandBufferWL(egl->display, data, EGL_HEIGHT, height);
-
-	EGLint _inverted_y;
-	if (egl->procs.eglQueryWaylandBufferWL(egl->display, data,
-			EGL_WAYLAND_Y_INVERTED_WL, &_inverted_y)) {
-		*inverted_y = !!_inverted_y;
-	} else {
-		*inverted_y = false;
-	}
-
-	const EGLint attribs[] = {
-		EGL_WAYLAND_PLANE_WL, 0,
-		EGL_NONE,
-	};
-	return egl->procs.eglCreateImageKHR(egl->display, egl->context,
-		EGL_WAYLAND_BUFFER_WL, data, attribs);
-}
-
 EGLImageKHR wlr_egl_create_image_from_dmabuf(struct wlr_egl *egl,
 		struct wlr_dmabuf_attributes *attributes, bool *external_only) {
-	if (!egl->exts.image_base_khr || !egl->exts.image_dmabuf_import_ext) {
+	if (!egl->exts.KHR_image_base || !egl->exts.EXT_image_dma_buf_import) {
 		wlr_log(WLR_ERROR, "dmabuf import extension not present");
 		return NULL;
 	}
 
-	bool has_modifier = false;
-
-	// we assume the same way we assumed formats without the import_modifiers
-	// extension that mod_linear is supported. The special mod mod_invalid
-	// is sometimes used to signal modifier unawareness which is what we
-	// have here
 	if (attributes->modifier != DRM_FORMAT_MOD_INVALID &&
-			attributes->modifier != DRM_FORMAT_MOD_LINEAR) {
-		if (!egl->exts.image_dmabuf_import_modifiers_ext) {
-			wlr_log(WLR_ERROR, "dmabuf modifiers extension not present");
-			return NULL;
-		}
-		has_modifier = true;
+			attributes->modifier != DRM_FORMAT_MOD_LINEAR &&
+			!egl->has_modifiers) {
+		wlr_log(WLR_ERROR, "EGL implementation doesn't support modifiers");
+		return NULL;
 	}
 
 	unsigned int atti = 0;
@@ -564,20 +696,26 @@ EGLImageKHR wlr_egl_create_image_from_dmabuf(struct wlr_egl *egl,
 		}
 	};
 
-	for (int i=0; i < attributes->n_planes; i++) {
+	for (int i = 0; i < attributes->n_planes; i++) {
 		attribs[atti++] = attr_names[i].fd;
 		attribs[atti++] = attributes->fd[i];
 		attribs[atti++] = attr_names[i].offset;
 		attribs[atti++] = attributes->offset[i];
 		attribs[atti++] = attr_names[i].pitch;
 		attribs[atti++] = attributes->stride[i];
-		if (has_modifier) {
+		if (egl->has_modifiers &&
+				attributes->modifier != DRM_FORMAT_MOD_INVALID) {
 			attribs[atti++] = attr_names[i].mod_lo;
 			attribs[atti++] = attributes->modifier & 0xFFFFFFFF;
 			attribs[atti++] = attr_names[i].mod_hi;
 			attribs[atti++] = attributes->modifier >> 32;
 		}
 	}
+
+	// Our clients don't expect our usage to trash the buffer contents
+	attribs[atti++] = EGL_IMAGE_PRESERVED_KHR;
+	attribs[atti++] = EGL_TRUE;
+
 	attribs[atti++] = EGL_NONE;
 	assert(atti < sizeof(attribs)/sizeof(attribs[0]));
 
@@ -594,7 +732,7 @@ EGLImageKHR wlr_egl_create_image_from_dmabuf(struct wlr_egl *egl,
 }
 
 static int get_egl_dmabuf_formats(struct wlr_egl *egl, int **formats) {
-	if (!egl->exts.image_dmabuf_import_ext) {
+	if (!egl->exts.EXT_image_dma_buf_import) {
 		wlr_log(WLR_DEBUG, "DMA-BUF import extension not present");
 		return -1;
 	}
@@ -604,7 +742,7 @@ static int get_egl_dmabuf_formats(struct wlr_egl *egl, int **formats) {
 	// supported; it's the intended way to just try to create buffers.
 	// Just a guess but better than not supporting dmabufs at all,
 	// given that the modifiers extension isn't supported everywhere.
-	if (!egl->exts.image_dmabuf_import_modifiers_ext) {
+	if (!egl->exts.EXT_image_dma_buf_import_modifiers) {
 		static const int fallback_formats[] = {
 			DRM_FORMAT_ARGB8888,
 			DRM_FORMAT_XRGB8888,
@@ -647,11 +785,11 @@ static int get_egl_dmabuf_modifiers(struct wlr_egl *egl, int format,
 	*modifiers = NULL;
 	*external_only = NULL;
 
-	if (!egl->exts.image_dmabuf_import_ext) {
+	if (!egl->exts.EXT_image_dma_buf_import) {
 		wlr_log(WLR_DEBUG, "DMA-BUF extension not present");
 		return -1;
 	}
-	if (!egl->exts.image_dmabuf_import_modifiers_ext) {
+	if (!egl->exts.EXT_image_dma_buf_import_modifiers) {
 		return 0;
 	}
 
@@ -760,23 +898,39 @@ static char *get_render_name(const char *name) {
 }
 
 int wlr_egl_dup_drm_fd(struct wlr_egl *egl) {
-	if (egl->device == EGL_NO_DEVICE_EXT || !egl->exts.device_drm_ext) {
+	if (egl->device == EGL_NO_DEVICE_EXT || (!egl->exts.EXT_device_drm &&
+			!egl->exts.EXT_device_drm_render_node)) {
 		return -1;
 	}
 
-	const char *primary_name = egl->procs.eglQueryDeviceStringEXT(egl->device,
-		EGL_DRM_DEVICE_FILE_EXT);
-	if (primary_name == NULL) {
-		wlr_log(WLR_ERROR,
-			"eglQueryDeviceStringEXT(EGL_DRM_DEVICE_FILE_EXT) failed");
-		return -1;
+	char *render_name = NULL;
+#ifdef EGL_EXT_device_drm_render_node
+	if (egl->exts.EXT_device_drm_render_node) {
+		const char *name = egl->procs.eglQueryDeviceStringEXT(egl->device,
+			EGL_DRM_RENDER_NODE_FILE_EXT);
+		if (name == NULL) {
+			wlr_log(WLR_DEBUG, "EGL device has no render node");
+			return -1;
+		}
+		render_name = strdup(name);
 	}
+#endif
 
-	char *render_name = get_render_name(primary_name);
 	if (render_name == NULL) {
-		wlr_log(WLR_ERROR, "Can't find render node name for device %s",
-			primary_name);
-		return -1;
+		const char *primary_name = egl->procs.eglQueryDeviceStringEXT(egl->device,
+			EGL_DRM_DEVICE_FILE_EXT);
+		if (primary_name == NULL) {
+			wlr_log(WLR_ERROR,
+				"eglQueryDeviceStringEXT(EGL_DRM_DEVICE_FILE_EXT) failed");
+			return -1;
+		}
+
+		render_name = get_render_name(primary_name);
+		if (render_name == NULL) {
+			wlr_log(WLR_ERROR, "Can't find render node name for device %s",
+				primary_name);
+			return -1;
+		}
 	}
 
 	int render_fd = open(render_name, O_RDWR | O_NONBLOCK | O_CLOEXEC);
