@@ -27,10 +27,6 @@ Files: include/xcursor/xcursor.h
 Copyright: 2002, Keith Packard
 License: Expat
 
-Files: protocol/gtk-primary-selection.xml
-Copyright: 2015, 2016 Red Hat
-License: Expat
-
 Files: protocol/input-method-unstable-v2.xml
 Copyright: 2008-2011 Kristian Høgsberg
  2010-2011 Intel Corporation

@@ -1,3 +1,14 @@
+wlroots (0.15.0-2) experimental; urgency=medium
+
+  * [7c01dd7] Use libdrm 2.4.109.
+    This allows us to drop the reverted upstream change.
+  * [1784c6e] Use wayland 1.20.
+    This allows us to revert the reverted upstream change
+  * [f60b70a] Bump standards version
+  * [838be17] d/copyright: Drop unused pattern
+
+ -- Guido Günther <agx@sigxcpu.org>  Mon, 14 Feb 2022 15:25:46 +0100
+
 wlroots (0.15.0-1) experimental; urgency=medium
 
   * New upstream release

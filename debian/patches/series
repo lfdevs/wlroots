@@ -1,4 +1,1 @@
 Revert-layer-shell-error-on-0-dimension-without-anchors.patch
-Revert-output-add-support-for-protocol-interface-version-.patch
-Revert-backend-wayland-add-basic-linux-dmabuf-feedback-su.patch
-Revert-util-global-remove-wl_display-arg-from-wlr_global_.patch
