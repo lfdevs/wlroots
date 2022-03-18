@@ -1,3 +1,10 @@
+wlroots (0.15.0-3) experimental; urgency=medium
+
+  * [f909925] d/control: Bump meson and wayland-protocol dependencies.
+    Adjust to what the project requires (Closes: #966176)
+
+ -- Guido Günther <agx@sigxcpu.org>  Fri, 18 Mar 2022 15:11:32 +0100
+
 wlroots (0.15.0-2) experimental; urgency=medium
 
   * [7c01dd7] Use libdrm 2.4.109.
