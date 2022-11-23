@@ -4,10 +4,11 @@ Maintainer: Sway and related packages team <team+swaywm@tracker.debian.org>
 Uploaders: Guido Günther <agx@sigxcpu.org>, Birger Schacht <birger@rantanplan.org>
 Build-Depends:
  debhelper-compat (= 13),
+ hwdata,
  libavformat-dev,
  libavcodec-dev,
  libcap-dev,
- libdrm-dev (>= 2.4.109),
+ libdrm-dev (>= 2.4.113),
  libegl1-mesa-dev,
  libgbm-dev (>= 17.1.0),
  libgles2-mesa-dev,
@@ -30,7 +31,7 @@ Build-Depends:
  libxcb-xinput-dev,
  libx11-xcb-dev,
  libxkbcommon-dev,
- meson (>= 0.58.1),
+ meson (>= 0.59.0),
  pkg-config,
  wayland-protocols (>= 1.24),
  xwayland,
@@ -47,7 +48,7 @@ Architecture: any
 Multi-Arch: same
 Depends:
  ${misc:Depends},
- libwlroots10 (= ${binary:Version}),
+ libwlroots11 (= ${binary:Version}),
  libcap-dev,
  libdrm-dev,
  libegl1-mesa-dev,
@@ -78,7 +79,7 @@ Description: Modular wayland compositor library - development headers
  .
  This package contains the development headers.
 
-Package: libwlroots10
+Package: libwlroots11
 Architecture: any
 Multi-Arch: same
 Depends:
