@@ -1,3 +1,12 @@
+wlroots (0.16.2-1) experimental; urgency=medium
+
+  * New upstream release
+  * [ed00fc6] Drop patches contained in the release
+  * Make autopkgtest a shell script. Thanks Andreas Henriksson
+    for the review.
+
+ -- Guido Günther <agx@sigxcpu.org>  Sun, 19 Feb 2023 15:25:33 +0100
+
 wlroots (0.16.1-2) experimental; urgency=medium
 
   * [d707bc2] libwlroots-dev: Depend on vulkan development package
