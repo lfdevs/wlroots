@@ -1,3 +1,22 @@
+wlroots (0.17.3-1) experimental; urgency=medium
+
+  * Upload to experimental
+  * New upstream release
+  * [9c7b1f8] Drop gles2-Avoid-crash-when-glGetInteger64vEXT-is-missing.patch:
+    Applied upstream
+
+ -- Guido Günther <agx@sigxcpu.org>  Sat, 04 May 2024 14:28:54 +0200
+
+wlroots (0.17.2-2) unstable; urgency=medium
+
+  * Upload to unstable 
+  * Acknowledge NMU (Closes: #1063089)
+  * Use pkgconf
+  * Bump versions wayland-protocols dependency
+    Closes: #1029381, #1064497
+
+ -- Guido Günther <agx@sigxcpu.org>  Sat, 04 May 2024 09:31:44 +0200
+
 wlroots (0.17.2-1) experimental; urgency=medium
 
   * Upload to experimental to not disturb ongoing transitions
@@ -6,6 +25,13 @@ wlroots (0.17.2-1) experimental; urgency=medium
     Backport of upstream commit 341b3c8bd2387d9d6fb684e006a4eb45dfe09efa
 
  -- Guido Günther <agx@sigxcpu.org>  Tue, 12 Mar 2024 19:16:00 +0100
+
+wlroots (0.17.1-2.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Rename libraries for 64-bit time_t transition.  Closes: #1063089
+
+ -- Steve Langasek <vorlon@debian.org>  Thu, 29 Feb 2024 02:36:15 +0000
 
 wlroots (0.17.1-2) unstable; urgency=medium
 
