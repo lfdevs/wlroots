@@ -1,8 +1,16 @@
-wlroots (0.18.2-1) UNRELEASED; urgency=medium
+wlroots (0.18.2-1) unstable; urgency=medium
 
+  [ Guido Günther ]
   * New upstream release
 
- -- Guido Günther <agx@sigxcpu.org>  Tue, 31 Dec 2024 15:32:10 +0100
+  [ Diederik de Haas ]
+  * [65600d4] d/control: Update Build Dependencies.
+  * [881be43] d/tests/control: Update Test Build Dependencies.
+    Debian commit 2a8b2e52aa3d ("Use pkgconf") switched from
+    ``pkg-config`` to ``pkgconf``, so update the test B-Ds as well.
+  * [bfe3f70] d/control: Add liblcms2-dev for color profile support.
+
+ -- Guido Günther <agx@sigxcpu.org>  Tue, 31 Dec 2024 15:49:47 +0100
 
 wlroots (0.18.1-1) unstable; urgency=medium
 
