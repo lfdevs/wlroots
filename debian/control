@@ -64,6 +64,7 @@ Depends:
  libgbm-dev,
  libgles2-mesa-dev,
  libinput-dev,
+ liblcms2-dev,
  libpixman-1-dev,
  libseat-dev,
  libsystemd-dev,
