@@ -1,3 +1,11 @@
+wlroots (0.18.2-2) unstable; urgency=medium
+
+  [ Birger Schacht ]
+  * [c11c02a] d/control: add liblcms2-dev to Depends instead of only the test
+    Depends: (Closes: #1091944)
+
+ -- Guido Günther <agx@sigxcpu.org>  Thu, 02 Jan 2025 19:31:31 +0100
+
 wlroots (0.18.2-1) unstable; urgency=medium
 
   [ Guido Günther ]
