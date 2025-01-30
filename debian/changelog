@@ -1,3 +1,10 @@
+wlroots (0.18.2-3) unstable; urgency=medium
+
+  * [378b702] seat: Don't forget to destroy touch points on touch up
+    This is a prereq for phoc/phosh to work.
+
+ -- Guido Günther <agx@sigxcpu.org>  Thu, 30 Jan 2025 19:46:02 +0100
+
 wlroots (0.18.2-2) unstable; urgency=medium
 
   [ Birger Schacht ]
