@@ -1,3 +1,16 @@
+wlroots (0.19.0~rc1-1) experimental; urgency=medium
+
+  * New upstream release candidate
+  * [7c7447d] Update to 0.19 ABI
+  * [71e338f] Bump build-dependencies
+  * [994bb62] Rediff patches.
+    Drop seat-Don-t-forget-to-destroy-touch-points-on-touch-up.patch: applied
+    upstream
+  * [f3201f4] Remove fullscreen-shell example, dropped upstream
+  * [7eaf935] Bump standards version
+
+ -- Guido Günther <agx@sigxcpu.org>  Sun, 13 Apr 2025 21:27:52 +0200
+
 wlroots (0.18.2-3) unstable; urgency=medium
 
   * [378b702] seat: Don't forget to destroy touch points on touch up

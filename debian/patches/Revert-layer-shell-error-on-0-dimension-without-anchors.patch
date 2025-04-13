@@ -10,22 +10,22 @@ Revert this until phosh has a fixed release.
  1 file changed, 2 insertions(+)
 
 diff --git a/types/wlr_layer_shell_v1.c b/types/wlr_layer_shell_v1.c
-index a59f110..8070f82 100644
+index 2d83849..c3c50d7 100644
 --- a/types/wlr_layer_shell_v1.c
 +++ b/types/wlr_layer_shell_v1.c
-@@ -336,6 +336,7 @@ static void layer_surface_role_client_commit(struct wlr_surface *wlr_surface) {
- 		return;
- 	}
+@@ -358,6 +358,7 @@ static void layer_surface_role_client_commit(struct wlr_surface *wlr_surface) {
+ 
+ 	uint32_t anchor = surface->pending.anchor;
  
 +#if 0
  	const uint32_t horiz = ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
  		ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
- 	if (surface->pending.desired_width == 0 &&
-@@ -355,6 +356,7 @@ static void layer_surface_role_client_commit(struct wlr_surface *wlr_surface) {
+ 	if (surface->pending.desired_width == 0 && (anchor & horiz) != horiz) {
+@@ -375,6 +376,7 @@ static void layer_surface_role_client_commit(struct wlr_surface *wlr_surface) {
  			"height 0 requested without setting top and bottom anchors");
  		return;
  	}
 +#endif
- }
  
- static void layer_surface_role_commit(struct wlr_surface *wlr_surface) {
+ 	if ((anchor & surface->pending.exclusive_edge) != surface->pending.exclusive_edge) {
+ 		wlr_surface_reject_pending(wlr_surface, surface->resource,

@@ -23,16 +23,15 @@ packages:
   - x11-servers/xwayland
   - sysutils/libdisplay-info
   - sysutils/seatd
-  - gmake
   - hwdata
 sources:
   - https://gitlab.freedesktop.org/wlroots/wlroots.git
 tasks:
   - wlroots: |
       cd wlroots
-      meson setup build --fatal-meson-warnings -Dauto_features=enabled
+      meson setup build --fatal-meson-warnings -Dauto_features=enabled -Dallocators=gbm
       ninja -C build
       sudo ninja -C build install
   - tinywl: |
       cd wlroots/tinywl
-      gmake
+      make
