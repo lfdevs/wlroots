@@ -1,3 +1,9 @@
+wlroots (0.19.0~rc2-1) experimental; urgency=medium
+
+  * New upstream release candidate
+
+ -- Guido Günther <agx@sigxcpu.org>  Sun, 20 Apr 2025 14:25:29 +0200
+
 wlroots (0.19.0~rc1-1) experimental; urgency=medium
 
   * New upstream release candidate

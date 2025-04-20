@@ -259,9 +259,20 @@ static const struct xdg_surface_interface xdg_surface_implementation = {
 static void update_geometry(struct wlr_xdg_surface *surface) {
 	if (!wlr_box_empty(&surface->current.geometry)) {
 		if ((surface->current.committed & WLR_XDG_SURFACE_STATE_WINDOW_GEOMETRY) != 0) {
-			wlr_surface_get_extents(surface->surface, &surface->geometry);
-			wlr_box_intersection(&surface->geometry,
-				&surface->current.geometry, &surface->geometry);
+			struct wlr_box *geom = &surface->geometry;
+			wlr_surface_get_extents(surface->surface, geom);
+
+			wlr_box_intersection(geom, geom, &surface->current.geometry);
+			if (wlr_box_empty(geom)) {
+				wlr_log(WLR_INFO,
+					"A client has committed an invalid effective window geometry (%d,%d %dx%d); "
+					"this will result in client disconnection in the future",
+					geom->x, geom->y, geom->width, geom->height);
+
+				// Fall back to the explicitly set window geometry as extents could be empty which
+				// would result in strange state when the client commits a buffer later
+				*geom = surface->current.geometry;
+			}
 		}
 	} else {
 		wlr_surface_get_extents(surface->surface, &surface->geometry);
@@ -332,10 +343,10 @@ static void xdg_surface_role_commit(struct wlr_surface *wlr_surface) {
 		break;
 	}
 
-	if (wlr_surface->mapped) {
-		update_geometry(surface);
-	} else if (wlr_surface_has_buffer(wlr_surface)) {
+	if (!wlr_surface->mapped && wlr_surface_has_buffer(wlr_surface)) {
 		wlr_surface_map(wlr_surface);
+	} else {
+		update_geometry(surface);
 	}
 }
 
