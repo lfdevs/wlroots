@@ -1,3 +1,9 @@
+wlroots (0.19.0-1) experimental; urgency=medium
+
+  * New upstream release
+
+ -- Guido Günther <agx@sigxcpu.org>  Fri, 23 May 2025 16:32:16 +0200
+
 wlroots (0.19.0~rc2-1) experimental; urgency=medium
 
   * New upstream release candidate
@@ -84,7 +90,7 @@ wlroots (0.17.4-1) unstable; urgency=medium
 
 wlroots (0.17.3-2) unstable; urgency=medium
 
-  * Upload to unstable 
+  * Upload to unstable
 
  -- Guido Günther <agx@sigxcpu.org>  Mon, 17 Jun 2024 07:35:17 +0200
 
@@ -99,7 +105,7 @@ wlroots (0.17.3-1) experimental; urgency=medium
 
 wlroots (0.17.2-2) unstable; urgency=medium
 
-  * Upload to unstable 
+  * Upload to unstable
   * Acknowledge NMU (Closes: #1063089)
   * Use pkgconf
   * Bump versions wayland-protocols dependency
