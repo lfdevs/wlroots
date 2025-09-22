@@ -1,3 +1,10 @@
+wlroots (0.19.1-1) unstable; urgency=medium
+
+  * New upstream release
+  * Wrap and sort
+
+ -- Guido Günther <agx@sigxcpu.org>  Mon, 22 Sep 2025 17:34:39 +0200
+
 wlroots (0.19.0-2) unstable; urgency=medium
 
   * Upload to unstable
