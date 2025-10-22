@@ -1,3 +1,16 @@
+wlroots (0.19.2-1) unstable; urgency=medium
+
+  [ Guido Günther ]
+  * New upstream release
+
+  [ Diederik de Haas ]
+  * tests: Update tests to use wlroots-0.19
+    The autopkgtest job of Salsa CI fails as it still referenced
+    wlroots-0.18 instead of wlroots-0.19. So update the B-D and the test
+    script to use the 0.19 versions of wlroots instead.
+
+ -- Guido Günther <agx@sigxcpu.org>  Wed, 22 Oct 2025 10:48:25 +0200
+
 wlroots (0.19.1-1) unstable; urgency=medium
 
   * New upstream release

@@ -2,7 +2,7 @@ Tests:
  build-test,
 Depends:
  build-essential,
- libwlroots-0.18-dev,
+ libwlroots-0.19-dev,
  pkgconf,
 Restrictions:
  allow-stderr,
