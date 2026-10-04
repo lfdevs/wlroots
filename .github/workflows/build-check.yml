@@ -1,0 +1,155 @@
+name: Build Check
+
+on:
+  pull_request:
+    branches:
+      - ubuntu/resolute
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04-arm
+    env:
+      CCACHE_DIR: /github/home/.cache/ccache
+      CCACHE_BASEDIR: /github/home/wlroots
+      CCACHE_COMPILERCHECK: content
+      CCACHE_STATSLOG: /github/home/ccache.stats
+    container:
+      image: ubuntu:resolute
+      options: --privileged --user root
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          apt update
+          apt build-dep -y wlroots
+          apt install -y git ccache build-essential devscripts fakeroot quilt git-buildpackage pristine-tar libpipewire-0.3-dev
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wlroots-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-wlroots-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Configure ccache
+        run: |
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'unset CCACHE_DISABLE CCACHE_NOSTATS' \
+            'export CCACHE_DIR=/github/home/.cache/ccache' \
+            'export CCACHE_BASEDIR=/github/home/wlroots' \
+            'export CCACHE_COMPILERCHECK=content' \
+            'export CCACHE_STATSLOG=/github/home/ccache.stats' \
+            'printf ".\\n" >> /github/home/ccache-wrapper.log' \
+            'exec /usr/bin/ccache "$@"' \
+            > /usr/local/bin/ccache
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'exec /usr/local/bin/ccache /usr/bin/gcc "$@"' \
+            > /usr/local/bin/ccache-gcc
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'exec /usr/local/bin/ccache /usr/bin/g++ "$@"' \
+            > /usr/local/bin/ccache-g++
+          chmod 0755 /usr/local/bin/ccache /usr/local/bin/ccache-gcc /usr/local/bin/ccache-g++
+          test "$(command -v ccache)" = "/usr/local/bin/ccache"
+          ccache --set-config=max_size=2G
+          ccache --show-config
+          ccache --zero-stats
+          printf 'int main(void) { return 0; }\n' > /tmp/ccache-smoke.c
+          ccache cc -c /tmp/ccache-smoke.c -o /tmp/ccache-smoke.o
+          smoke_calls=$(ccache --print-stats | awk \
+            '$1 == "cache_miss" || $1 == "direct_cache_hit" || $1 == "preprocessed_cache_hit" { total += $2 } END { print total + 0 }')
+          test "$smoke_calls" -gt 0
+          ccache --zero-stats
+          : > "$CCACHE_STATSLOG"
+          : > /github/home/ccache-wrapper.log
+
+      - name: Clone repository
+        run: |
+          cd ~
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git clone -b ${{ github.event.pull_request.head.ref }} --depth 1 ${{ github.event.pull_request.head.repo.html_url }}.git wlroots
+          cd wlroots
+          git switch -c ci-build
+
+      - name: Set release name suffix
+        shell: bash
+        run: |
+          cd ~/wlroots
+          short_hash=$(git rev-parse --short HEAD)
+          echo "WLROOTS_RELEASE_NAME_SUFFIX=${short_hash}_ubuntu_resolute_arm64" >> "$GITHUB_ENV"
+
+      - name: Build wlroots
+        shell: bash
+        run: |
+          echo "Building wlroots..."
+          cd ~/wlroots
+          test "$(command -v ccache)" = "/usr/local/bin/ccache"
+          origtargz
+          git add .
+          if ! git diff --cached --quiet; then
+            git commit -m "Add source code"
+          fi
+          gbp buildpackage -uc -us -jauto \
+            --git-builder='debuild --prepend-path=/usr/local/bin --set-envvar=CC=/usr/local/bin/ccache-gcc --set-envvar=CXX=/usr/local/bin/ccache-g++ -i -I' \
+            --git-ignore-branch --git-no-pristine-tar
+          wrapper_calls=$(wc -l < /github/home/ccache-wrapper.log)
+          ccache --show-stats --verbose
+          ccache --show-log-stats
+          cacheable_calls=$(ccache --print-log-stats | awk \
+            '$1 == "cache_miss" || $1 == "direct_cache_hit" || $1 == "preprocessed_cache_hit" { total += $2 } END { print total + 0 }')
+          echo "ccache wrapper calls recorded: $wrapper_calls"
+          echo "Cacheable calls recorded: $cacheable_calls"
+          test "$wrapper_calls" -gt 0
+          test "$cacheable_calls" -gt 0
+          du -sh "$CCACHE_DIR"
+          echo "wlroots build completed successfully!"
+
+      - name: Save ccache
+        uses: actions/cache/save@v5
+        if: always()
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-wlroots-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Collect packages for debug
+        shell: bash
+        run: |
+          cd ~
+          echo "Calculating sha256 checksums..."
+          find . -maxdepth 1 \( -name "*.deb" \) -type f -printf "%P\0" | xargs -0 sha256sum | sort -k2 > sha256sums_debug.txt
+          cat sha256sums_debug.txt && echo
+
+      - name: Upload build artifacts for debug
+        uses: actions/upload-artifact@v7
+        with:
+          name: wlroots_${{ env.WLROOTS_RELEASE_NAME_SUFFIX }}_debug
+          path: |
+            ~/*.deb
+            ~/sha256sums_debug.txt
+          retention-days: 90
+
+      - name: Collect packages
+        shell: bash
+        run: |
+          cd ~
+          rm -f *dev* *dbgsym* *examples*
+          echo "Calculating sha256 checksums..."
+          find . -maxdepth 1 \( -name "*.deb" \) -type f -printf "%P\0" | xargs -0 sha256sum | sort -k2 > sha256sums.txt
+          cat sha256sums.txt && echo
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: wlroots_${{ env.WLROOTS_RELEASE_NAME_SUFFIX }}
+          path: |
+            ~/*.deb
+            ~/sha256sums.txt
+          retention-days: 90
