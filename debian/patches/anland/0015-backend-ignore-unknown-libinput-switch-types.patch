@@ -1,0 +1,22 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 10:18:53 +0800
+Subject: backend: ignore unknown libinput switch types
+
+Ignore switch types added by newer libinput versions instead of leaving the wlroots switch event type uninitialized. This keeps -Werror builds working while preserving the supported lid and tablet mode events.
+---
+ backend/libinput/switch.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/backend/libinput/switch.c b/backend/libinput/switch.c
+index abeec86..51fb5da 100644
+--- a/backend/libinput/switch.c
++++ b/backend/libinput/switch.c
+@@ -36,6 +36,8 @@ void handle_switch_toggle(struct libinput_event *event,
+ 	case LIBINPUT_SWITCH_TABLET_MODE:
+ 		wlr_event.switch_type = WLR_SWITCH_TYPE_TABLET_MODE;
+ 		break;
++	default:
++		return;
+ 	}
+ 	switch (libinput_event_switch_get_switch_state(sevent)) {
+ 	case LIBINPUT_SWITCH_STATE_OFF:
