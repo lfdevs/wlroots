@@ -1,0 +1,421 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 04:32:39 +0800
+Subject: backend: harden Anland stream framing
+
+Handle partial SOCK_STREAM headers, bound handshake payloads, validate imported buffer sets, discard unknown data messages, and use bounded I/O for input extensions and output events. Malformed or stalled transport data now enters the existing reconnect path.
+---
+ backend/anland/display_producer.c | 270 ++++++++++++++++++++++++++++----------
+ 1 file changed, 201 insertions(+), 69 deletions(-)
+
+diff --git a/backend/anland/display_producer.c b/backend/anland/display_producer.c
+index 3fcecbf..ecaf181 100644
+--- a/backend/anland/display_producer.c
++++ b/backend/anland/display_producer.c
+@@ -14,6 +14,7 @@
+ /* poll() timeout (ms) for the two reconnect handshake steps. Kept short so the
+  * caller's reconnect loop stays responsive when no consumer is present yet. */
+ #define HANDSHAKE_TIMEOUT_MS 100
++#define INPUT_MESSAGE_TIMEOUT_MS 100
+ 
+ struct display_ctx {
+     int      ctrl_fd;
+@@ -38,7 +39,7 @@ struct display_ctx {
+ };
+ 
+ /*
+- * Release every consumer-side resource (dmabuf fds, the four picked-up fds and the
++ * Release every consumer-side resource (dmabuf fds, the five picked-up fds and the
+  * shm mapping), leaving the context holding only the daemon ctrl_fd. Does NOT touch
+  * the fallback flag or fire the fallback callback — callers decide that. Idempotent.
+  */
+@@ -76,10 +77,104 @@ static void enter_fallback(display_ctx *ctx)
+     release_consumer_resources(ctx);
+ }
+ 
++static void close_fds(int *fds, int count) {
++    for (int i = 0; i < count; i++) {
++        close(fds[i]);
++    }
++}
++
++static int recv_all_timeout(int fd, void *buf, size_t len, int timeout_ms) {
++    uint8_t *p = buf;
++    size_t received = 0;
++    while (received < len) {
++        ssize_t n = recv(fd, p + received, len - received, MSG_DONTWAIT);
++        if (n > 0) {
++            received += (size_t)n;
++            continue;
++        }
++        if (n == 0) {
++            return -1;
++        }
++        if (errno == EINTR) {
++            continue;
++        }
++        if (errno != EAGAIN) {
++            return -1;
++        }
++
++        struct pollfd pfd = { .fd = fd, .events = POLLIN };
++        int ret;
++        do {
++            ret = poll(&pfd, 1, timeout_ms);
++        } while (ret < 0 && errno == EINTR);
++        if (ret <= 0 || (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
++            return -1;
++        }
++    }
++    return 0;
++}
++
++static int send_all_timeout(int fd, const void *buf, size_t len, int timeout_ms) {
++    const uint8_t *p = buf;
++    size_t sent = 0;
++    while (sent < len) {
++        ssize_t n = send(fd, p + sent, len - sent,
++            MSG_NOSIGNAL | MSG_DONTWAIT);
++        if (n > 0) {
++            sent += (size_t)n;
++            continue;
++        }
++        if (n < 0 && errno == EINTR) {
++            continue;
++        }
++        if (n >= 0 || errno != EAGAIN) {
++            return -1;
++        }
++
++        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
++        int ret;
++        do {
++            ret = poll(&pfd, 1, timeout_ms);
++        } while (ret < 0 && errno == EINTR);
++        if (ret <= 0 || (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
++            return -1;
++        }
++    }
++    return 0;
++}
++
++static int discard_data_payload(display_ctx *ctx, uint32_t size) {
++    uint8_t buf[4096];
++    while (size > 0) {
++        size_t chunk = size < sizeof(buf) ? size : sizeof(buf);
++        if (recv_all_timeout(ctx->data_fd, buf, chunk,
++                INPUT_MESSAGE_TIMEOUT_MS) < 0) {
++            return -1;
++        }
++        size -= (uint32_t)chunk;
++    }
++    return 0;
++}
++
++/* SOCK_STREAM may split a header even though its SCM_RIGHTS message arrived. */
++static int recv_fds_exact(int sock, void *data, size_t data_len,
++        int *fds, int max_fds, int *fd_count) {
++    int n = recv_fds(sock, data, data_len, fds, max_fds, fd_count);
++    if (n < 0) {
++        return -1;
++    }
++    if ((size_t)n < data_len && recv_all_timeout(sock,
++            (uint8_t *)data + n, data_len - (size_t)n,
++            HANDSHAKE_TIMEOUT_MS) < 0) {
++        return -1;
++    }
++    return 0;
++}
++
+ /*
+  * Ask the daemon for the consumer-side fds and map the shm index. Polls ctrl_fd
+  * with a short timeout so it returns promptly when no consumer is up yet. On
+- * success the four fds and shm_ptr are installed on ctx; the caller releases them
++ * success the five fds and shm_ptr are installed on ctx; the caller releases them
+  * via release_consumer_resources() on any later failure. Returns 0 / -1.
+  */
+ static int pickup_fds(display_ctx *ctx)
+@@ -89,16 +184,17 @@ static int pickup_fds(display_ctx *ctx)
+         return -1;
+ 
+     struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
+-    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
++    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0 ||
++            (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)))
+         return -1;
+ 
+     int fds[5];
+     int fd_count = 0;
+     struct ctrl_msg resp;
+-    int n = recv_fds(ctx->ctrl_fd, &resp, sizeof(resp), fds, 5, &fd_count);
+-    if (n <= 0 || resp.type != CTRL_MSG_FDS_READY || fd_count < 5) {
+-        for (int i = 0; i < fd_count; i++)
+-            close(fds[i]);
++    if (recv_fds_exact(ctx->ctrl_fd, &resp, sizeof(resp), fds, 5,
++            &fd_count) < 0 || resp.type != CTRL_MSG_FDS_READY ||
++            resp.size != 0 || fd_count != 5) {
++        close_fds(fds, fd_count);
+         return -1;
+     }
+ 
+@@ -130,49 +226,49 @@ static int receive_dmabufs(display_ctx *ctx)
+         return 0;
+ 
+     struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN | POLLHUP | POLLERR };
+-    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
+-        return -1;
+-    if (pfd.revents & (POLLHUP | POLLERR))
++    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0 ||
++            (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)))
+         return -1;
+ 
+     struct data_msg dhdr;
+     int fds[MAX_BUFS];
+     int fd_count = 0;
+ 
+-    int n = recv_fds(ctx->data_fd, &dhdr, sizeof(dhdr), fds, MAX_BUFS, &fd_count);
+-    if (n < (int)sizeof(struct data_msg) || fd_count < 1) {
+-        for (int i = 0; i < fd_count; i++)
+-            close(fds[i]);
+-        return -1;
+-    }
+-
+-    if (dhdr.type != DATA_MSG_BUFS_READY) {
+-        for (int i = 0; i < fd_count; i++)
+-            close(fds[i]);
++    if (recv_fds_exact(ctx->data_fd, &dhdr, sizeof(dhdr), fds,
++            MAX_BUFS, &fd_count) < 0 || fd_count < 1) {
++        close_fds(fds, fd_count);
+         return -1;
+     }
+ 
+-    if (dhdr.size == 0 || dhdr.size % sizeof(struct buf_info) != 0 ||
++    if (dhdr.type != DATA_MSG_BUFS_READY || dhdr.size == 0 ||
++            dhdr.size % sizeof(struct buf_info) != 0 ||
+             dhdr.size > MAX_BUFS * sizeof(struct buf_info)) {
+-        for (int i = 0; i < fd_count; i++)
+-            close(fds[i]);
++        close_fds(fds, fd_count);
+         return -1;
+     }
+ 
+     int count = dhdr.size / sizeof(struct buf_info);
+-    if (count != fd_count || count > MAX_BUFS) {
+-        for (int i = 0; i < fd_count; i++)
+-            close(fds[i]);
++    if (count != fd_count || count < 1 || count > MAX_BUFS) {
++        close_fds(fds, fd_count);
+         return -1;
+     }
+ 
+     struct buf_info infos[MAX_BUFS];
+-    if (recv_all(ctx->data_fd, infos, dhdr.size) < 0) {
+-        for (int i = 0; i < fd_count; i++)
+-            close(fds[i]);
++    if (recv_all_timeout(ctx->data_fd, infos, dhdr.size,
++            HANDSHAKE_TIMEOUT_MS) < 0) {
++        close_fds(fds, fd_count);
+         return -1;
+     }
+ 
++    for (int i = 0; i < count; i++) {
++        if (infos[i].width == 0 || infos[i].height == 0 ||
++                (i > 0 && (infos[i].width != infos[0].width ||
++                           infos[i].height != infos[0].height))) {
++            close_fds(fds, fd_count);
++            return -1;
++        }
++    }
++
+     for (int i = 0; i < count; i++) {
+         ctx->dmabuf_fds[i] = fds[i];
+         ctx->dmabuf_infos[i] = infos[i];
+@@ -183,6 +279,10 @@ static int receive_dmabufs(display_ctx *ctx)
+ 
+ int connect_to_deamon(display_ctx **out, const char *socket_path)
+ {
++    if (!out || !socket_path) {
++        return -1;
++    }
++    *out = NULL;
+     display_ctx *ctx = calloc(1, sizeof(*ctx));
+     if (!ctx)
+         return -1;
+@@ -280,7 +380,7 @@ int trigger_refresh(display_ctx *ctx)
+      * SCM_RIGHTS ancillary data when we have one; otherwise a bare byte is sent so
+      * the consumer's per-frame recv always has exactly one message (it then queues
+      * with -1). The consumer hands the fence to queueBuffer -> SurfaceFlinger waits
+-     * GPU-side. NON-BLOCKING: this runs on kwin's main thread, which must never block
++     * GPU-side. NON-BLOCKING: this runs on the compositor's main thread, which must never block
+      * on our socket. In lockstep the consumer always drains, so the one-message
+      * buffer never fills; a momentary miss self-heals via the consumer's 5s
+      * poll->fallback rather than freezing the compositor. data_fd's reverse direction
+@@ -324,31 +424,42 @@ int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
+     if (ctx->fallback)
+         return 0;
+ 
+-    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
+-    int ret = poll(&pfd, 1, timeout_ms);
+-    if (ret <= 0)
+-        return 0;
++    for (;;) {
++        struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
++        int ret;
++        do {
++            ret = poll(&pfd, 1, timeout_ms);
++        } while (ret < 0 && errno == EINTR);
++        if (ret <= 0) {
++            return 0;
++        }
++        if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
++            enter_fallback(ctx);
++            return -1;
++        }
+ 
+-    if (pfd.revents & (POLLHUP | POLLERR)) {
+-        enter_fallback(ctx);
+-        return -1;
++        struct data_msg hdr;
++        if (recv_all_timeout(ctx->data_fd, &hdr, sizeof(hdr),
++                INPUT_MESSAGE_TIMEOUT_MS) < 0) {
++            enter_fallback(ctx);
++            return -1;
++        }
++        if (hdr.type != DATA_MSG_INPUT_EVENT) {
++            if (discard_data_payload(ctx, hdr.size) < 0) {
++                enter_fallback(ctx);
++                return -1;
++            }
++            timeout_ms = 0;
++            continue;
++        }
++        if (hdr.size != sizeof(struct InputEvent) ||
++                recv_all_timeout(ctx->data_fd, event, sizeof(*event),
++                    INPUT_MESSAGE_TIMEOUT_MS) < 0) {
++            enter_fallback(ctx);
++            return -1;
++        }
++        return 1;
+     }
+-
+-    uint8_t msg_buf[sizeof(struct data_msg) + sizeof(struct InputEvent)];
+-    ssize_t n = recv(ctx->data_fd, msg_buf, sizeof(msg_buf), MSG_PEEK);
+-    if (n < (ssize_t)sizeof(struct data_msg))
+-        return 0;
+-
+-    struct data_msg hdr;
+-    memcpy(&hdr, msg_buf, sizeof(hdr));
+-    if (hdr.type != DATA_MSG_INPUT_EVENT)
+-        return 0;
+-
+-    if (recv_all(ctx->data_fd, msg_buf, sizeof(struct data_msg) + sizeof(struct InputEvent)) < 0)
+-        return -1;
+-
+-    memcpy(event, msg_buf + sizeof(struct data_msg), sizeof(*event));
+-    return 1;
+ }
+ int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
+                                 int *fd_count, int timeout_ms)
+@@ -358,26 +469,29 @@ int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
+         return 0;
+ 
+     struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
+-    int ret = poll(&pfd, 1, timeout_ms);
++    int ret;
++    do {
++        ret = poll(&pfd, 1, timeout_ms);
++    } while (ret < 0 && errno == EINTR);
+     if (ret <= 0)
+         return 0;
+ 
+-    if (pfd.revents & (POLLHUP | POLLERR)) {
++    if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+         enter_fallback(ctx);
+         return -1;
+     }
+ 
+     struct data_msg hdr;
+     int got = 0;
+-    int n = recv_fds(ctx->data_fd, &hdr, sizeof(hdr), fds, max_fds, &got);
+-    if (n < (int)sizeof(struct data_msg)) {
+-        for (int i = 0; i < got; i++)
+-            close(fds[i]);
++    if (recv_fds_exact(ctx->data_fd, &hdr, sizeof(hdr), fds, max_fds,
++            &got) < 0) {
++        close_fds(fds, got);
++        enter_fallback(ctx);
+         return -1;
+     }
+-    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS) {
+-        for (int i = 0; i < got; i++)
+-            close(fds[i]);
++    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS || hdr.size != 0 || got < 1) {
++        close_fds(fds, got);
++        enter_fallback(ctx);
+         return -1;
+     }
+     *fd_count = got;
+@@ -408,7 +522,8 @@ int push_output_event(display_ctx *ctx, const struct OutputEvent *event)
+     memcpy(msg, &hdr, sizeof(hdr));
+     memcpy(msg + sizeof(hdr), event, sizeof(*event));
+ 
+-    if (send_all(ctx->data_fd, msg, sizeof(msg)) < 0) {
++    if (send_all_timeout(ctx->data_fd, msg, sizeof(msg),
++            INPUT_MESSAGE_TIMEOUT_MS) < 0) {
+         enter_fallback(ctx);
+         return -1;
+     }
+@@ -419,13 +534,20 @@ int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *ev
+     if (ctx->fallback)
+         return 0;
+ 
++    size_t base_size = sizeof(struct data_msg) + sizeof(struct OutputEvent);
++    if (size > SIZE_MAX - base_size || (size > 0 && !payload))
++        return -1;
+     struct data_msg hdr = { .type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(struct OutputEvent) };
+-    uint8_t *msg = (uint8_t *)malloc(sizeof(struct data_msg) + sizeof(struct OutputEvent) + size);
++    uint8_t *msg = malloc(base_size + size);
++    if (!msg)
++        return -1;
+     memcpy(msg, &hdr, sizeof(hdr));
+     memcpy(msg + sizeof(hdr), event, sizeof(*event));
+-    memcpy(msg + sizeof(hdr) + sizeof(struct OutputEvent), payload, size);
++    if (size > 0)
++        memcpy(msg + base_size, payload, size);
+ 
+-    if (send_all(ctx->data_fd, msg, sizeof(struct data_msg) + sizeof(struct OutputEvent) + size) < 0) {
++    if (send_all_timeout(ctx->data_fd, msg, base_size + size,
++            INPUT_MESSAGE_TIMEOUT_MS) < 0) {
+         free(msg);
+         enter_fallback(ctx);
+         return -1;
+@@ -438,17 +560,27 @@ int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, i
+     if (ctx->fallback)
+         return 0;
+ 
++    if (size == 0)
++        return 1;
++    if (!payload)
++        return -1;
++
+     struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
+-    int ret = poll(&pfd, 1, timeout_ms);
++    int ret;
++    do {
++        ret = poll(&pfd, 1, timeout_ms);
++    } while (ret < 0 && errno == EINTR);
+     if (ret <= 0)
+         return 0;
+ 
+-    if (pfd.revents & (POLLHUP | POLLERR)) {
++    if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+         enter_fallback(ctx);
+         return -1;
+     }
+-    if (recv_all(ctx->data_fd, payload, size) < 0)
++    if (recv_all_timeout(ctx->data_fd, payload, size, timeout_ms) < 0) {
++        enter_fallback(ctx);
+         return -1;
++    }
+     return 1;
+ }
+ int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata)
