@@ -1,0 +1,52 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 09:21:15 +0800
+Subject: backend: adapt Anland to wlroots 0.19 APIs
+
+Update the Anland backend and surfaceless EGL setup for the wlroots 0.19 backend interface and EGL initialization signature.
+---
+ backend/anland/backend.c | 7 +------
+ render/egl.c             | 2 +-
+ 2 files changed, 2 insertions(+), 7 deletions(-)
+
+diff --git a/backend/anland/backend.c b/backend/anland/backend.c
+index 1bad21f..d129a99 100644
+--- a/backend/anland/backend.c
++++ b/backend/anland/backend.c
+@@ -160,16 +160,10 @@ static int backend_get_drm_fd(struct wlr_backend *wlr_backend) {
+ 	return -1;
+ }
+ 
+-static uint32_t backend_get_buffer_caps(struct wlr_backend *wlr_backend) {
+-	(void)wlr_backend;
+-	return WLR_BUFFER_CAP_DMABUF;
+-}
+-
+ static const struct wlr_backend_impl backend_impl = {
+ 	.start = backend_start,
+ 	.destroy = backend_destroy,
+ 	.get_drm_fd = backend_get_drm_fd,
+-	.get_buffer_caps = backend_get_buffer_caps,
+ };
+ 
+ static int reconnect_event(void *data) {
+@@ -215,6 +209,7 @@ struct wlr_backend *wlr_anland_backend_create(struct wl_event_loop *loop,
+ 		return NULL;
+ 	}
+ 	wlr_backend_init(&backend->backend, &backend_impl);
++	backend->backend.buffer_caps = WLR_BUFFER_CAP_DMABUF;
+ 	backend->event_loop = loop;
+ 	wl_list_init(&backend->outputs);
+ 	backend->socket_path = strdup(socket_path ? socket_path : DEFAULT_SOCKET_PATH);
+diff --git a/render/egl.c b/render/egl.c
+index 568390e..69608af 100644
+--- a/render/egl.c
++++ b/render/egl.c
+@@ -571,7 +571,7 @@ struct wlr_egl *wlr_egl_create_with_drm_fd(int drm_fd) {
+ 			wlr_log(WLR_ERROR, "EGL_MESA_platform_surfaceless not supported");
+ 			goto error;
+ 		}
+-		if (egl_init(egl, EGL_PLATFORM_SURFACELESS_MESA, NULL)) {
++		if (egl_init(egl, EGL_PLATFORM_SURFACELESS_MESA, NULL, allow_software)) {
+ 			wlr_log(WLR_DEBUG, "Using EGL_PLATFORM_SURFACELESS_MESA");
+ 			return egl;
+ 		}

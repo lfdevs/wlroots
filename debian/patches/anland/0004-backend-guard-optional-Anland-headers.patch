@@ -1,0 +1,21 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 04:16:59 +0800
+Subject: backend: guard optional Anland headers
+
+Include the Anland public backend header only when the backend is enabled, keeping configurations without Anland from depending on an excluded optional header.
+---
+ backend/backend.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/backend/backend.c b/backend/backend.c
+index 6669306..805821c 100644
+--- a/backend/backend.c
++++ b/backend/backend.c
+@@ -5,7 +5,6 @@
+ #include <wayland-server-core.h>
+ 
+ #include <wlr/backend/headless.h>
+-#include <wlr/backend/anland.h>
+ #include <wlr/backend/interface.h>
+ #include <wlr/backend/multi.h>
+ #include <wlr/backend/wayland.h>

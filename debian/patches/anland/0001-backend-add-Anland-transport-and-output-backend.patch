@@ -1,0 +1,2136 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 03:54:03 +0800
+Subject: backend: add Anland transport and output backend
+
+Add the Anland 5.13 display-daemon transport, DMA-BUF-backed output, virtual input devices, and reconnect handling. Expose the backend through WLR_BACKENDS=anland and the ANLAND_SOCKET environment variable.
+---
+ backend/anland/allocator.c        | 117 +++++++++
+ backend/anland/anland.h           |  79 ++++++
+ backend/anland/backend.c          | 313 ++++++++++++++++++++++
+ backend/anland/display_producer.c | 536 ++++++++++++++++++++++++++++++++++++++
+ backend/anland/display_producer.h |  93 +++++++
+ backend/anland/input.c            | 216 +++++++++++++++
+ backend/anland/meson.build        |   9 +
+ backend/anland/output.c           | 156 +++++++++++
+ backend/anland/protocol.h         | 192 ++++++++++++++
+ backend/anland/socket_utils.c     | 121 +++++++++
+ backend/anland/socket_utils.h     |  18 ++
+ backend/backend.c                 |  28 ++
+ backend/meson.build               |   2 +-
+ include/meson.build               |   3 +
+ include/types/wlr_output.h        |   2 +
+ include/wlr/backend/anland.h      |  28 ++
+ include/wlr/config.h.in           |   5 +
+ meson.build                       |   1 +
+ meson.options                     |   2 +-
+ 19 files changed, 1919 insertions(+), 2 deletions(-)
+ create mode 100644 backend/anland/allocator.c
+ create mode 100644 backend/anland/anland.h
+ create mode 100644 backend/anland/backend.c
+ create mode 100644 backend/anland/display_producer.c
+ create mode 100644 backend/anland/display_producer.h
+ create mode 100644 backend/anland/input.c
+ create mode 100644 backend/anland/meson.build
+ create mode 100644 backend/anland/output.c
+ create mode 100644 backend/anland/protocol.h
+ create mode 100644 backend/anland/socket_utils.c
+ create mode 100644 backend/anland/socket_utils.h
+ create mode 100644 include/wlr/backend/anland.h
+
+diff --git a/backend/anland/allocator.c b/backend/anland/allocator.c
+new file mode 100644
+index 0000000..276b2b2
+--- /dev/null
++++ b/backend/anland/allocator.c
+@@ -0,0 +1,117 @@
++#include <assert.h>
++#include <drm_fourcc.h>
++#include <stdlib.h>
++
++#include <wlr/interfaces/wlr_buffer.h>
++#include <wlr/render/allocator.h>
++#include <wlr/render/drm_format_set.h>
++#include <wlr/util/log.h>
++
++#include "anland.h"
++
++static const struct wlr_buffer_impl buffer_impl;
++
++static struct wlr_anland_buffer *anland_buffer_from_buffer(
++		struct wlr_buffer *buffer) {
++	assert(buffer->impl == &buffer_impl);
++	struct wlr_anland_buffer *anland_buffer =
++		wl_container_of(buffer, anland_buffer, base);
++	return anland_buffer;
++}
++
++static void buffer_destroy(struct wlr_buffer *wlr_buffer) {
++	struct wlr_anland_buffer *buffer = anland_buffer_from_buffer(wlr_buffer);
++	free(buffer);
++}
++
++static bool buffer_get_dmabuf(struct wlr_buffer *wlr_buffer,
++		struct wlr_dmabuf_attributes *attrs) {
++	struct wlr_anland_buffer *buffer = anland_buffer_from_buffer(wlr_buffer);
++	*attrs = buffer->dmabuf;
++	return true;
++}
++
++static const struct wlr_buffer_impl buffer_impl = {
++	.destroy = buffer_destroy,
++	.get_dmabuf = buffer_get_dmabuf,
++};
++
++bool anland_buffer_is(struct wlr_buffer *buffer) {
++	return buffer != NULL && buffer->impl == &buffer_impl;
++}
++
++int anland_buffer_index(struct wlr_buffer *buffer) {
++	if (!anland_buffer_is(buffer)) {
++		return -1;
++	}
++	return anland_buffer_from_buffer(buffer)->index;
++}
++
++static struct wlr_buffer *allocator_create_buffer(
++		struct wlr_allocator *wlr_allocator, int width, int height,
++		const struct wlr_drm_format *format) {
++	struct wlr_anland_allocator *allocator =
++		wl_container_of(wlr_allocator, allocator, base);
++	struct wlr_anland_backend *backend = allocator->backend;
++
++	if (!backend->display || is_fallback(backend->display)) {
++		return NULL;
++	}
++
++	int index = get_selected_idx(backend->display);
++	struct buf_info info;
++	if (get_dmabuf_info_at(backend->display, index, &info) < 0) {
++		return NULL;
++	}
++	if (info.width != (uint32_t)width || info.height != (uint32_t)height) {
++		wlr_log(WLR_DEBUG, "Anland buffer size mismatch: requested %dx%d, got %ux%u",
++			width, height, info.width, info.height);
++		return NULL;
++	}
++
++	uint32_t buffer_format = info.format == 1 ? DRM_FORMAT_ABGR8888 : DRM_FORMAT_XRGB8888;
++	if (format->format != buffer_format) {
++		wlr_log(WLR_DEBUG, "Anland buffer format mismatch: requested 0x%08x, got 0x%08x",
++			format->format, buffer_format);
++		return NULL;
++	}
++
++	struct wlr_anland_buffer *buffer = calloc(1, sizeof(*buffer));
++	if (!buffer) {
++		return NULL;
++	}
++	wlr_buffer_init(&buffer->base, &buffer_impl, width, height);
++	buffer->backend = backend;
++	buffer->index = index;
++	buffer->dmabuf.width = info.width;
++	buffer->dmabuf.height = info.height;
++	buffer->dmabuf.format = buffer_format;
++	buffer->dmabuf.modifier = info.modifier;
++	buffer->dmabuf.n_planes = 1;
++	buffer->dmabuf.fd[0] = get_dmabuf_fd_at(backend->display, index);
++	buffer->dmabuf.offset[0] = info.offset;
++	buffer->dmabuf.stride[0] = info.stride;
++	return &buffer->base;
++}
++
++static void allocator_destroy(struct wlr_allocator *wlr_allocator) {
++	struct wlr_anland_allocator *allocator =
++		wl_container_of(wlr_allocator, allocator, base);
++	free(allocator);
++}
++
++static const struct wlr_allocator_interface allocator_impl = {
++	.create_buffer = allocator_create_buffer,
++	.destroy = allocator_destroy,
++};
++
++struct wlr_allocator *wlr_anland_allocator_create(
++		struct wlr_anland_backend *backend) {
++	struct wlr_anland_allocator *allocator = calloc(1, sizeof(*allocator));
++	if (!allocator) {
++		return NULL;
++	}
++	wlr_allocator_init(&allocator->base, &allocator_impl, WLR_BUFFER_CAP_DMABUF);
++	allocator->backend = backend;
++	return &allocator->base;
++}
+diff --git a/backend/anland/anland.h b/backend/anland/anland.h
+new file mode 100644
+index 0000000..265e44f
+--- /dev/null
++++ b/backend/anland/anland.h
+@@ -0,0 +1,79 @@
++#ifndef WLR_BACKEND_ANLAND_PRIVATE_H
++#define WLR_BACKEND_ANLAND_PRIVATE_H
++
++#include <stdbool.h>
++#include <wayland-server-core.h>
++#include <wlr/backend/anland.h>
++#include <wlr/interfaces/wlr_keyboard.h>
++#include <wlr/interfaces/wlr_pointer.h>
++#include <wlr/interfaces/wlr_touch.h>
++#include <wlr/render/allocator.h>
++#include <wlr/types/wlr_buffer.h>
++
++#include "display_producer.h"
++
++struct wlr_allocator;
++struct wlr_anland_output;
++
++struct wlr_anland_backend {
++	struct wlr_backend backend;
++	struct wl_event_loop *event_loop;
++
++	display_ctx *display;
++	char *socket_path;
++	uint32_t screen_width, screen_height;
++	uint32_t pixel_format, refresh;
++	float scale;
++
++	struct wl_list outputs;
++	struct wlr_anland_output *output;
++	struct wlr_allocator *allocator;
++
++	struct wlr_keyboard keyboard;
++	struct wlr_pointer pointer;
++	struct wlr_touch touch;
++
++	struct wl_event_source *data_source;
++	struct wl_event_source *buf_ready_source;
++	struct wl_event_source *reconnect_timer;
++	struct wl_listener event_loop_destroy;
++
++	bool started;
++	bool consumer_ready;
++};
++
++struct wlr_anland_output {
++	struct wlr_output wlr_output;
++	struct wlr_anland_backend *backend;
++	struct wl_list link;
++};
++
++struct wlr_anland_buffer {
++	struct wlr_buffer base;
++	struct wlr_anland_backend *backend;
++	int index;
++	struct wlr_dmabuf_attributes dmabuf;
++};
++
++struct wlr_anland_allocator {
++	struct wlr_allocator base;
++	struct wlr_anland_backend *backend;
++};
++
++struct wlr_anland_backend *anland_backend_from_backend(
++	struct wlr_backend *backend);
++struct wlr_anland_output *anland_output_from_output(
++	struct wlr_output *output);
++void anland_output_drop_swapchain(struct wlr_anland_output *output);
++void anland_output_send_frame(struct wlr_anland_output *output);
++struct wlr_anland_output *wlr_anland_output_create(
++	struct wlr_anland_backend *backend);
++struct wlr_allocator *wlr_anland_allocator_create(
++	struct wlr_anland_backend *backend);
++bool anland_buffer_is(struct wlr_buffer *buffer);
++int anland_buffer_index(struct wlr_buffer *buffer);
++
++void anland_process_input_event(struct wlr_anland_backend *backend,
++	const struct InputEvent *event);
++
++#endif
+diff --git a/backend/anland/backend.c b/backend/anland/backend.c
+new file mode 100644
+index 0000000..0df2e2b
+--- /dev/null
++++ b/backend/anland/backend.c
+@@ -0,0 +1,313 @@
++#define _GNU_SOURCE
++
++#include <assert.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/eventfd.h>
++#include <unistd.h>
++
++#include <wlr/backend/interface.h>
++#include <wlr/interfaces/wlr_keyboard.h>
++#include <wlr/interfaces/wlr_pointer.h>
++#include <wlr/interfaces/wlr_touch.h>
++#include <wlr/util/log.h>
++
++#include "anland.h"
++
++#define DEFAULT_SOCKET_PATH "/tmp/display_daemon.sock"
++#define DEFAULT_REFRESH 120000
++#define RECONNECT_INTERVAL_MS 200
++
++static const struct wlr_keyboard_impl keyboard_impl = {
++	.name = "anland-keyboard",
++};
++static const struct wlr_pointer_impl pointer_impl = {
++	.name = "anland-pointer",
++};
++static const struct wlr_touch_impl touch_impl = {
++	.name = "anland-touch",
++};
++
++struct wlr_anland_backend *anland_backend_from_backend(
++		struct wlr_backend *backend) {
++	assert(wlr_backend_is_anland(backend));
++	struct wlr_anland_backend *anland =
++		wl_container_of(backend, anland, backend);
++	return anland;
++}
++
++static int data_event(int fd, uint32_t mask, void *data);
++static int buffer_ready_event(int fd, uint32_t mask, void *data);
++
++static void remove_sources(struct wlr_anland_backend *backend) {
++	if (backend->data_source) {
++		wl_event_source_remove(backend->data_source);
++		backend->data_source = NULL;
++	}
++	if (backend->buf_ready_source) {
++		wl_event_source_remove(backend->buf_ready_source);
++		backend->buf_ready_source = NULL;
++	}
++}
++
++static void consumer_fallback(void *data) {
++	struct wlr_anland_backend *backend = data;
++	wlr_log(WLR_INFO, "Anland consumer disconnected");
++	remove_sources(backend);
++	backend->consumer_ready = false;
++	if (backend->output) {
++		anland_output_drop_swapchain(backend->output);
++	}
++	if (backend->reconnect_timer) {
++		wl_event_source_timer_update(backend->reconnect_timer,
++			RECONNECT_INTERVAL_MS);
++	}
++}
++
++static bool install_sources(struct wlr_anland_backend *backend) {
++	remove_sources(backend);
++
++	int data_fd = get_data_fd(backend->display);
++	if (data_fd >= 0) {
++		backend->data_source = wl_event_loop_add_fd(backend->event_loop,
++			data_fd, WL_EVENT_READABLE | WL_EVENT_HANGUP | WL_EVENT_ERROR,
++			data_event, backend);
++		if (!backend->data_source) {
++			return false;
++		}
++	}
++
++	int ready_fd = get_buffer_ready_fd(backend->display);
++	if (ready_fd >= 0) {
++		backend->buf_ready_source = wl_event_loop_add_fd(backend->event_loop,
++			ready_fd, WL_EVENT_READABLE | WL_EVENT_HANGUP | WL_EVENT_ERROR,
++			buffer_ready_event, backend);
++		if (!backend->buf_ready_source) {
++			remove_sources(backend);
++			return false;
++		}
++	}
++	return true;
++}
++
++static bool backend_start(struct wlr_backend *wlr_backend) {
++	struct wlr_anland_backend *backend =
++		anland_backend_from_backend(wlr_backend);
++	backend->started = true;
++
++	wlr_log(WLR_INFO, "Starting Anland backend");
++	wl_signal_emit_mutable(&backend->backend.events.new_input,
++		&backend->keyboard.base);
++	wl_signal_emit_mutable(&backend->backend.events.new_input,
++		&backend->pointer.base);
++	wl_signal_emit_mutable(&backend->backend.events.new_input,
++		&backend->touch.base);
++	if (backend->output) {
++		wl_signal_emit_mutable(&backend->backend.events.new_output,
++			&backend->output->wlr_output);
++	}
++
++	if (backend->reconnect_timer) {
++		wl_event_source_timer_update(backend->reconnect_timer, 0);
++	}
++	return true;
++}
++
++static void backend_destroy(struct wlr_backend *wlr_backend) {
++	if (!wlr_backend) {
++		return;
++	}
++	struct wlr_anland_backend *backend =
++		anland_backend_from_backend(wlr_backend);
++
++	remove_sources(backend);
++	if (backend->reconnect_timer) {
++		wl_event_source_remove(backend->reconnect_timer);
++		backend->reconnect_timer = NULL;
++	}
++	if (backend->output) {
++		wlr_output_destroy(&backend->output->wlr_output);
++		backend->output = NULL;
++	}
++
++	wlr_keyboard_finish(&backend->keyboard);
++	wlr_pointer_finish(&backend->pointer);
++	wlr_touch_finish(&backend->touch);
++
++	if (backend->display) {
++		disconnect(backend->display);
++		backend->display = NULL;
++	}
++	wlr_backend_finish(wlr_backend);
++	wl_list_remove(&backend->event_loop_destroy.link);
++	free(backend->socket_path);
++	free(backend);
++}
++
++static int backend_get_drm_fd(struct wlr_backend *wlr_backend) {
++	(void)wlr_backend;
++	return -1;
++}
++
++static uint32_t backend_get_buffer_caps(struct wlr_backend *wlr_backend) {
++	(void)wlr_backend;
++	return WLR_BUFFER_CAP_DMABUF;
++}
++
++static const struct wlr_backend_impl backend_impl = {
++	.start = backend_start,
++	.destroy = backend_destroy,
++	.get_drm_fd = backend_get_drm_fd,
++	.get_buffer_caps = backend_get_buffer_caps,
++};
++
++static int reconnect_event(void *data) {
++	struct wlr_anland_backend *backend = data;
++	if (!is_fallback(backend->display)) {
++		return 0;
++	}
++	if (try_exit_fallback(backend->display) < 0) {
++		wl_event_source_timer_update(backend->reconnect_timer,
++			RECONNECT_INTERVAL_MS);
++		return 0;
++	}
++
++	wlr_log(WLR_INFO, "Anland consumer connected (%d buffers)",
++		get_buf_count(backend->display));
++	if (!install_sources(backend)) {
++		force_fallback(backend->display);
++		wl_event_source_timer_update(backend->reconnect_timer,
++			RECONNECT_INTERVAL_MS);
++		return 0;
++	}
++	if (backend->output) {
++		anland_output_drop_swapchain(backend->output);
++		anland_output_send_frame(backend->output);
++	}
++	return 0;
++}
++
++static void handle_event_loop_destroy(struct wl_listener *listener, void *data) {
++	struct wlr_anland_backend *backend =
++		wl_container_of(listener, backend, event_loop_destroy);
++	backend_destroy(&backend->backend);
++}
++
++struct wlr_backend *wlr_anland_backend_create(struct wl_event_loop *loop,
++		const char *socket_path) {
++	struct wlr_anland_backend *backend = calloc(1, sizeof(*backend));
++	if (!backend) {
++		return NULL;
++	}
++	wlr_backend_init(&backend->backend, &backend_impl);
++	backend->event_loop = loop;
++	wl_list_init(&backend->outputs);
++	backend->socket_path = strdup(socket_path ? socket_path : DEFAULT_SOCKET_PATH);
++	backend->scale = 1.0f;
++	const char *scale = getenv("WLR_ANLAND_SCALE");
++	if (scale) {
++		char *end = NULL;
++		float value = strtof(scale, &end);
++		if (end != scale && *end == '\0' && value > 0.0f) {
++			backend->scale = value;
++		}
++	}
++
++	if (connect_to_deamon(&backend->display, backend->socket_path) < 0) {
++		wlr_log(WLR_ERROR, "Failed to connect to Anland daemon at %s",
++			backend->socket_path);
++		goto error;
++	}
++	get_screen_info(backend->display, &backend->screen_width,
++		&backend->screen_height, &backend->pixel_format, &backend->refresh);
++	if (backend->refresh == 0) {
++		backend->refresh = DEFAULT_REFRESH;
++	}
++
++	wlr_keyboard_init(&backend->keyboard, &keyboard_impl, "anland-keyboard");
++	wlr_pointer_init(&backend->pointer, &pointer_impl, "anland-pointer");
++	wlr_touch_init(&backend->touch, &touch_impl, "anland-touch");
++
++	backend->allocator = wlr_anland_allocator_create(backend);
++	if (!backend->allocator) {
++		goto error_display;
++	}
++	if (!wlr_anland_output_create(backend)) {
++		goto error_display;
++	}
++
++	set_fallback_callback(backend->display, consumer_fallback, backend);
++	backend->reconnect_timer = wl_event_loop_add_timer(loop,
++		reconnect_event, backend);
++	if (!backend->reconnect_timer) {
++		goto error_display;
++	}
++	backend->event_loop_destroy.notify = handle_event_loop_destroy;
++	wl_event_loop_add_destroy_listener(loop, &backend->event_loop_destroy);
++	return &backend->backend;
++
++error_display:
++	if (backend->output) {
++		wlr_output_destroy(&backend->output->wlr_output);
++	}
++	if (backend->display) {
++		disconnect(backend->display);
++	}
++	wlr_keyboard_finish(&backend->keyboard);
++	wlr_pointer_finish(&backend->pointer);
++	wlr_touch_finish(&backend->touch);
++error:
++	free(backend->socket_path);
++	free(backend);
++	return NULL;
++}
++
++bool wlr_backend_is_anland(struct wlr_backend *backend) {
++	return backend != NULL && backend->impl == &backend_impl;
++}
++
++struct wlr_allocator *wlr_anland_backend_get_allocator(
++		struct wlr_backend *backend) {
++	if (!wlr_backend_is_anland(backend)) {
++		return NULL;
++	}
++	return anland_backend_from_backend(backend)->allocator;
++}
++
++static int data_event(int fd, uint32_t mask, void *data) {
++	struct wlr_anland_backend *backend = data;
++	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
++		consumer_fallback(backend);
++		return 0;
++	}
++	struct InputEvent event;
++	while (poll_input_event(backend->display, &event, 0) > 0) {
++		anland_process_input_event(backend, &event);
++		if (is_fallback(backend->display)) {
++			break;
++		}
++	}
++	return 0;
++}
++
++static int buffer_ready_event(int fd, uint32_t mask, void *data) {
++	struct wlr_anland_backend *backend = data;
++	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
++		consumer_fallback(backend);
++		return 0;
++	}
++	eventfd_t value;
++	while (eventfd_read(fd, &value) == 0) {
++		if (is_fallback(backend->display)) {
++			return 0;
++		}
++		backend->consumer_ready = true;
++		if (backend->output) {
++			anland_output_drop_swapchain(backend->output);
++			anland_output_send_frame(backend->output);
++		}
++	}
++	return 0;
++}
+diff --git a/backend/anland/display_producer.c b/backend/anland/display_producer.c
+new file mode 100644
+index 0000000..f77bd5a
+--- /dev/null
++++ b/backend/anland/display_producer.c
+@@ -0,0 +1,536 @@
++#define _GNU_SOURCE
++#include "display_producer.h"
++#include "socket_utils.h"
++
++#include <errno.h>
++#include <poll.h>
++#include <stdbool.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++/* poll() timeout (ms) for the two reconnect handshake steps. Kept short so the
++ * caller's reconnect loop stays responsive when no consumer is present yet. */
++#define HANDSHAKE_TIMEOUT_MS 100
++
++struct display_ctx {
++    int      ctrl_fd;
++    int      data_fd;
++    int      buf_ready_efd;
++    int      fence_fd;        /* write end of the dedicated render-done fence channel */
++    int      shm_fd;
++    int      audio_fd;        /* local end of the bidirectional audio socketpair (hello slot 4) */
++    int      pending_render_fence; /* render-done fence for the in-flight frame */
++    volatile uint32_t *shm_ptr;
++    uint32_t screen_w, screen_h;
++    uint32_t pixel_format;
++    uint32_t refresh;
++    bool     fallback;
++
++    int      dmabuf_fds[MAX_BUFS];
++    struct buf_info dmabuf_infos[MAX_BUFS];
++    int      buf_count;
++
++    void (*fallback_cb)(void *);
++    void  *fallback_userdata;
++};
++
++/*
++ * Release every consumer-side resource (dmabuf fds, the four picked-up fds and the
++ * shm mapping), leaving the context holding only the daemon ctrl_fd. Does NOT touch
++ * the fallback flag or fire the fallback callback — callers decide that. Idempotent.
++ */
++static void release_consumer_resources(display_ctx *ctx)
++{
++    for (int i = 0; i < ctx->buf_count; i++) {
++        if (ctx->dmabuf_fds[i] >= 0) {
++            close(ctx->dmabuf_fds[i]);
++            ctx->dmabuf_fds[i] = -1;
++        }
++    }
++    ctx->buf_count = 0;
++
++    if (ctx->data_fd >= 0)          { close(ctx->data_fd);          ctx->data_fd = -1; }
++    if (ctx->buf_ready_efd >= 0)    { close(ctx->buf_ready_efd);    ctx->buf_ready_efd = -1; }
++    if (ctx->fence_fd >= 0)         { close(ctx->fence_fd);         ctx->fence_fd = -1; }
++    if (ctx->audio_fd >= 0)         { close(ctx->audio_fd);         ctx->audio_fd = -1; }
++    if (ctx->pending_render_fence >= 0) { close(ctx->pending_render_fence); ctx->pending_render_fence = -1; }
++    if (ctx->shm_ptr)               { munmap((void *)ctx->shm_ptr, sizeof(uint32_t)); ctx->shm_ptr = NULL; }
++    if (ctx->shm_fd >= 0)           { close(ctx->shm_fd);           ctx->shm_fd = -1; }
++}
++
++static void enter_fallback(display_ctx *ctx)
++{
++    if (ctx->fallback)
++        return;
++    ctx->fallback = true;
++
++    /* Let the backend detach users of borrowed fds (notably PipeWire's audio
++     * loop source) before those fds are closed below. Destroying a loop source
++     * after its fd has already been closed can leave a stale dispatch entry. */
++    if (ctx->fallback_cb)
++        ctx->fallback_cb(ctx->fallback_userdata);
++
++    release_consumer_resources(ctx);
++}
++
++/*
++ * Ask the daemon for the consumer-side fds and map the shm index. Polls ctrl_fd
++ * with a short timeout so it returns promptly when no consumer is up yet. On
++ * success the four fds and shm_ptr are installed on ctx; the caller releases them
++ * via release_consumer_resources() on any later failure. Returns 0 / -1.
++ */
++static int pickup_fds(display_ctx *ctx)
++{
++    struct ctrl_msg hdr = { .type = CTRL_MSG_PICKUP_FDS, .size = 0 };
++    if (send_all(ctx->ctrl_fd, &hdr, sizeof(hdr)) < 0)
++        return -1;
++
++    struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
++    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
++        return -1;
++
++    int fds[5];
++    int fd_count = 0;
++    struct ctrl_msg resp;
++    int n = recv_fds(ctx->ctrl_fd, &resp, sizeof(resp), fds, 5, &fd_count);
++    if (n <= 0 || resp.type != CTRL_MSG_FDS_READY || fd_count < 5) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    /* Slot order matches the consumer's send_hello_fds(): { buf_ready, fence, data, shm, audio }.
++     * fence_fd is the write end of the dedicated producer->consumer render-done channel;
++     * audio_fd is the full-duplex PCM socket (producer writes playback, reads mic). */
++    ctx->buf_ready_efd    = fds[0];
++    ctx->fence_fd         = fds[1];
++    ctx->data_fd          = fds[2];
++    ctx->shm_fd           = fds[3];
++    ctx->audio_fd         = fds[4];
++
++    ctx->shm_ptr = mmap(NULL, sizeof(uint32_t), PROT_READ, MAP_SHARED, ctx->shm_fd, 0);
++    if (ctx->shm_ptr == MAP_FAILED) {
++        ctx->shm_ptr = NULL;
++        return -1;
++    }
++    return 0;
++}
++
++/*
++ * Receive the dmabuf set the consumer pushes onto the data channel right after the
++ * fd handshake. Polls data_fd with a short timeout. On failure the caller releases
++ * the partially-acquired consumer resources. Returns 0 / -1.
++ */
++static int receive_dmabufs(display_ctx *ctx)
++{
++    if (ctx->buf_count > 0)
++        return 0;
++
++    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN | POLLHUP | POLLERR };
++    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
++        return -1;
++    if (pfd.revents & (POLLHUP | POLLERR))
++        return -1;
++
++    struct data_msg dhdr;
++    int fds[MAX_BUFS];
++    int fd_count = 0;
++
++    int n = recv_fds(ctx->data_fd, &dhdr, sizeof(dhdr), fds, MAX_BUFS, &fd_count);
++    if (n < (int)sizeof(struct data_msg) || fd_count < 1)
++        return -1;
++
++    if (dhdr.type != DATA_MSG_BUFS_READY) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    int count = dhdr.size / sizeof(struct buf_info);
++    if (count != fd_count || count > MAX_BUFS) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    struct buf_info infos[MAX_BUFS];
++    if (recv_all(ctx->data_fd, infos, dhdr.size) < 0) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    for (int i = 0; i < count; i++) {
++        ctx->dmabuf_fds[i] = fds[i];
++        ctx->dmabuf_infos[i] = infos[i];
++    }
++    ctx->buf_count = count;
++    return 0;
++}
++
++int connect_to_deamon(display_ctx **out, const char *socket_path)
++{
++    display_ctx *ctx = calloc(1, sizeof(*ctx));
++    if (!ctx)
++        return -1;
++
++    ctx->ctrl_fd = -1;
++    ctx->data_fd = -1;
++    ctx->buf_ready_efd = -1;
++    ctx->fence_fd = -1;
++    ctx->shm_fd = -1;
++    ctx->audio_fd = -1;
++    ctx->pending_render_fence = -1;
++    ctx->shm_ptr = NULL;
++    ctx->fallback = true; // stay in fallback until try_exit_fallback() succeeds
++    for (int i = 0; i < MAX_BUFS; i++)
++        ctx->dmabuf_fds[i] = -1;
++
++    ctx->ctrl_fd = connect_unix(socket_path);
++    if (ctx->ctrl_fd < 0)
++        goto fail;
++
++    struct ctrl_msg hdr = { .type = CTRL_MSG_PRODUCER_HELLO, .size = 0 };
++    if (send_all(ctx->ctrl_fd, &hdr, sizeof(hdr)) < 0)
++        goto fail;
++
++    uint8_t buf[sizeof(struct ctrl_msg) + sizeof(struct screen_info)];
++    if (recv_all(ctx->ctrl_fd, buf, sizeof(buf)) < 0)
++        goto fail;
++
++    struct ctrl_msg resp;
++    memcpy(&resp, buf, sizeof(resp));
++    if (resp.type != CTRL_MSG_SCREEN_INFO || resp.size != sizeof(struct screen_info))
++        goto fail;
++
++    struct screen_info si;
++    memcpy(&si, buf + sizeof(struct ctrl_msg), sizeof(si));
++    ctx->screen_w = si.width;
++    ctx->screen_h = si.height;
++    ctx->pixel_format = si.format;
++    ctx->refresh = si.refresh;
++
++    // Daemon handshake only: screen info is in hand, but the consumer fds and
++    // dmabufs are deliberately left for try_exit_fallback() so the backend brings
++    // the consumer up through the single reconnect path. Stay in fallback.
++    *out = ctx;
++    return 0;
++
++fail:
++    if (ctx->ctrl_fd >= 0)
++        close(ctx->ctrl_fd);
++    free(ctx);
++    return -1;
++}
++
++void disconnect(display_ctx *ctx)
++{
++    if (!ctx)
++        return;
++    release_consumer_resources(ctx);
++    if (ctx->ctrl_fd >= 0)
++        close(ctx->ctrl_fd);
++    free(ctx);
++}
++
++int get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_t *format, uint32_t *refresh)
++{
++    *width  = ctx->screen_w;
++    *height = ctx->screen_h;
++    *format = ctx->pixel_format;
++    *refresh = ctx->refresh;
++    return 0;
++}
++
++/* Stash the render-done fence for the in-flight frame (created in doEndFrame).
++ * trigger_refresh sends it to the consumer. Closes any previous unconsumed stash. */
++void set_render_fence(display_ctx *ctx, int fence_fd)
++{
++    if (ctx->pending_render_fence >= 0)
++        close(ctx->pending_render_fence);
++    ctx->pending_render_fence = fence_fd;
++}
++
++int trigger_refresh(display_ctx *ctx)
++{
++    if (ctx->fallback) {
++        if (ctx->pending_render_fence >= 0) {
++            close(ctx->pending_render_fence);
++            ctx->pending_render_fence = -1;
++        }
++        return 0;
++    }
++
++    /* Send exactly one render-done message per frame on the dedicated fence channel
++     * (producer->consumer). The message itself is the "frame rendered" signal -- no
++     * separate eventfd, no cross-channel ordering. The render fence rides as
++     * SCM_RIGHTS ancillary data when we have one; otherwise a bare byte is sent so
++     * the consumer's per-frame recv always has exactly one message (it then queues
++     * with -1). The consumer hands the fence to queueBuffer -> SurfaceFlinger waits
++     * GPU-side. NON-BLOCKING: this runs on kwin's main thread, which must never block
++     * on our socket. In lockstep the consumer always drains, so the one-message
++     * buffer never fills; a momentary miss self-heals via the consumer's 5s
++     * poll->fallback rather than freezing the compositor. data_fd's reverse direction
++     * is intentionally left unused (reserved for future extension). */
++    char b = 0;
++    struct iovec iov = { .iov_base = &b, .iov_len = 1 };
++    union {
++        char buf[CMSG_SPACE(sizeof(int))];
++        struct cmsghdr align;
++    } cmsg;
++    struct msghdr msg = {
++        .msg_iov = &iov,
++        .msg_iovlen = 1,
++    };
++    if (ctx->pending_render_fence >= 0) {
++        msg.msg_control = cmsg.buf;
++        msg.msg_controllen = sizeof(cmsg.buf);
++        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
++        c->cmsg_level = SOL_SOCKET;
++        c->cmsg_type = SCM_RIGHTS;
++        c->cmsg_len = CMSG_LEN(sizeof(int));
++        memcpy(CMSG_DATA(c), &ctx->pending_render_fence, sizeof(int));
++    }
++    sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
++    if (ctx->pending_render_fence >= 0) {
++        close(ctx->pending_render_fence);
++        ctx->pending_render_fence = -1;
++    }
++    return 0;
++}
++
++int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
++{
++    if (ctx->fallback)
++        return 0;
++
++    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
++    int ret = poll(&pfd, 1, timeout_ms);
++    if (ret <= 0)
++        return 0;
++
++    if (pfd.revents & (POLLHUP | POLLERR)) {
++        enter_fallback(ctx);
++        return -1;
++    }
++
++    uint8_t msg_buf[sizeof(struct data_msg) + sizeof(struct InputEvent)];
++    ssize_t n = recv(ctx->data_fd, msg_buf, sizeof(msg_buf), MSG_PEEK);
++    if (n < (ssize_t)sizeof(struct data_msg))
++        return 0;
++
++    struct data_msg hdr;
++    memcpy(&hdr, msg_buf, sizeof(hdr));
++    if (hdr.type != DATA_MSG_INPUT_EVENT)
++        return 0;
++
++    if (recv_all(ctx->data_fd, msg_buf, sizeof(struct data_msg) + sizeof(struct InputEvent)) < 0)
++        return -1;
++
++    memcpy(event, msg_buf + sizeof(struct data_msg), sizeof(*event));
++    return 1;
++}
++int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
++                                int *fd_count, int timeout_ms)
++{
++    *fd_count = 0;
++    if (ctx->fallback)
++        return 0;
++
++    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
++    int ret = poll(&pfd, 1, timeout_ms);
++    if (ret <= 0)
++        return 0;
++
++    if (pfd.revents & (POLLHUP | POLLERR)) {
++        enter_fallback(ctx);
++        return -1;
++    }
++
++    struct data_msg hdr;
++    int got = 0;
++    int n = recv_fds(ctx->data_fd, &hdr, sizeof(hdr), fds, max_fds, &got);
++    if (n < (int)sizeof(struct data_msg)) {
++        for (int i = 0; i < got; i++)
++            close(fds[i]);
++        return -1;
++    }
++    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS) {
++        for (int i = 0; i < got; i++)
++            close(fds[i]);
++        return -1;
++    }
++    *fd_count = got;
++    return 1;
++}
++
++int push_resources_request(display_ctx *ctx, uint32_t service_type, const uint32_t *args)
++{
++    struct OutputEvent ev;
++    memset(&ev, 0, sizeof(ev));
++    ev.type = OUTPUT_TYPE_RESOURCES_REQUEST;
++    ev.resources_request.type = service_type;
++    if (args) {
++        ev.resources_request.args[0] = args[0];
++        ev.resources_request.args[1] = args[1];
++        ev.resources_request.args[2] = args[2];
++    }
++    return push_output_event(ctx, &ev);
++}
++
++int push_output_event(display_ctx *ctx, const struct OutputEvent *event)
++{
++    if (ctx->fallback)
++        return 0;
++
++    struct data_msg hdr = { .type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(struct OutputEvent) };
++    uint8_t msg[sizeof(struct data_msg) + sizeof(struct OutputEvent)];
++    memcpy(msg, &hdr, sizeof(hdr));
++    memcpy(msg + sizeof(hdr), event, sizeof(*event));
++
++    if (send_all(ctx->data_fd, msg, sizeof(msg)) < 0) {
++        enter_fallback(ctx);
++        return -1;
++    }
++    return 0;
++}
++int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *event, void* payload, size_t size)
++{
++    if (ctx->fallback)
++        return 0;
++
++    struct data_msg hdr = { .type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(struct OutputEvent) };
++    uint8_t *msg = (uint8_t *)malloc(sizeof(struct data_msg) + sizeof(struct OutputEvent) + size);
++    memcpy(msg, &hdr, sizeof(hdr));
++    memcpy(msg + sizeof(hdr), event, sizeof(*event));
++    memcpy(msg + sizeof(hdr) + sizeof(struct OutputEvent), payload, size);
++
++    if (send_all(ctx->data_fd, msg, sizeof(struct data_msg) + sizeof(struct OutputEvent) + size) < 0) {
++        free(msg);
++        enter_fallback(ctx);
++        return -1;
++    }
++    free(msg);
++    return 0;
++}
++int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms)
++{
++    if (ctx->fallback)
++        return 0;
++
++    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
++    int ret = poll(&pfd, 1, timeout_ms);
++    if (ret <= 0)
++        return 0;
++
++    if (pfd.revents & (POLLHUP | POLLERR)) {
++        enter_fallback(ctx);
++        return -1;
++    }
++    if (recv_all(ctx->data_fd, payload, size) < 0)
++        return -1;
++    return 1;
++}
++int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata)
++{
++    ctx->fallback_cb = on_fallback;
++    ctx->fallback_userdata = userdata;
++    return 0;
++}
++
++bool is_fallback(display_ctx *ctx)
++{
++    return ctx->fallback;
++}
++
++int try_exit_fallback(display_ctx *ctx)
++{
++    if (!ctx->fallback)
++        return 0;
++
++    // Step 1: ask the daemon to hand over the consumer-side fds.
++    if (pickup_fds(ctx) < 0) {
++        release_consumer_resources(ctx);
++        return -1;
++    }
++
++    // Step 2: immediately pull the dmabuf set the consumer pushes right after the
++    // fd handshake. Only leave fallback once both fds and dmabufs are in hand, so
++    // the backend can import straight away.
++    if (receive_dmabufs(ctx) < 0) {
++        release_consumer_resources(ctx);
++        return -1;
++    }
++
++    ctx->fallback = false;
++    return 0;
++}
++
++int get_data_fd(display_ctx *ctx)
++{
++    return ctx->data_fd;
++}
++
++/* Current local end of the audio socketpair, or -1 in fallback. The value changes
++ * across reconnects (each pickup installs a fresh socket), so the audio engine must
++ * be re-pointed via anland_audio_set_fd() rather than caching it. */
++int get_audio_fd(display_ctx *ctx)
++{
++    return ctx->fallback ? -1 : ctx->audio_fd;
++}
++
++int get_buffer_ready_fd(display_ctx *ctx)
++{
++    return ctx->buf_ready_efd;
++}
++
++int get_buf_count(display_ctx *ctx)
++{
++    return ctx->buf_count;
++}
++
++int get_selected_idx(display_ctx *ctx)
++{
++    if (!ctx->shm_ptr)
++        return 0;
++    uint32_t idx = *ctx->shm_ptr;
++    return (idx < (uint32_t)ctx->buf_count) ? (int)idx : 0;
++}
++
++int get_dmabuf_fd(display_ctx *ctx)
++{
++    return get_dmabuf_fd_at(ctx, get_selected_idx(ctx));
++}
++
++int get_dmabuf_fd_at(display_ctx *ctx, int idx)
++{
++    if (idx < 0 || idx >= ctx->buf_count)
++        return -1;
++    return ctx->dmabuf_fds[idx];
++}
++
++int get_dmabuf_info(display_ctx *ctx, struct buf_info *info)
++{
++    return get_dmabuf_info_at(ctx, get_selected_idx(ctx), info);
++}
++
++int get_dmabuf_info_at(display_ctx *ctx, int idx, struct buf_info *info)
++{
++    if (idx < 0 || idx >= ctx->buf_count)
++        return -1;
++    *info = ctx->dmabuf_infos[idx];
++    return 0;
++}
++
++void force_fallback(display_ctx *ctx)
++{
++    if (!ctx || ctx->fallback)
++        return;
++    ctx->fallback = true;
++    if (ctx->fallback_cb)
++        ctx->fallback_cb(ctx->fallback_userdata);
++    release_consumer_resources(ctx);
++}
+diff --git a/backend/anland/display_producer.h b/backend/anland/display_producer.h
+new file mode 100644
+index 0000000..e57a371
+--- /dev/null
++++ b/backend/anland/display_producer.h
+@@ -0,0 +1,93 @@
++#ifndef DISPLAY_PRODUCER_H
++#define DISPLAY_PRODUCER_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include "protocol.h"
++
++typedef struct display_ctx display_ctx;
++
++/*
++ * Producer-side state machine
++ * ----------------------------
++ * connect_to_deamon() performs only the daemon handshake: it fetches the screen
++ * info and leaves the context in *fallback* (no consumer fds, no dmabufs). The
++ * backend then drives a reconnect loop that polls try_exit_fallback(); once that
++ * call succeeds the context owns the consumer fds and the dmabuf set, and
++ * is_fallback() returns false. Losing the consumer drops the context back to
++ * fallback (see set_fallback_callback) and the loop resumes.
++ */
++
++/* Connect to the daemon and fetch screen info only. Leaves the context in
++ * fallback: it does NOT pick up consumer fds or dmabufs. Returns 0 / -1. */
++int  connect_to_deamon(display_ctx **ctx, const char *socket_path);
++
++/* Tear down everything and disconnect from the daemon. */
++void disconnect(display_ctx *ctx);
++
++int  get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_t *format, uint32_t *refresh);
++
++/* Stash the render-done fence (created in doEndFrame) for the current frame. The
++ * next trigger_refresh hands it to the consumer on the dedicated fence channel, so
++ * SurfaceFlinger waits on it GPU-side instead of the producer CPU-blocking.
++ * Takes ownership of fence_fd (-1 = none). */
++void set_render_fence(display_ctx *ctx, int fence_fd);
++
++/* Signal the consumer that the current frame is done by sending one message (with
++ * the render fence, if any) on the dedicated fence channel. No-op in fallback. */
++int  trigger_refresh(display_ctx *ctx);
++
++/* Pull one pending input event. Returns 1 if an event was written, 0 if none was
++ * available, -1 on consumer loss. No-op (returns 0) in fallback. */
++int  poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms);
++int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms);
++
++/* Receive the fds that follow an INPUT_TYPE_RESOURCE event (a DATA_MSG_INPUT_EXTEND_FDS
++ * message carrying the service's fds as SCM_RIGHTS). Call this right after
++ * poll_input_event() returns an INPUT_TYPE_RESOURCE event, using event.resource.fdnum
++ * as the expected count. Writes up to max_fds received fds into fds[] and the actual
++ * count into *fd_count. Returns 1 on success, 0 if nothing was pending, -1 on error
++ * (consumer loss). The caller owns the received fds and must close them. */
++int  poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
++                                 int *fd_count, int timeout_ms);
++
++/* Ask the consumer for a service's resources (e.g. SERVICE_TYPE_CAMERA). Sends an
++ * OUTPUT_TYPE_RESOURCES_REQUEST; the consumer replies asynchronously with an
++ * INPUT_TYPE_RESOURCE event + fds on the data channel. args may be NULL (treated as
++ * three zeros). No-op (returns 0) in fallback. */
++int  push_resources_request(display_ctx *ctx, uint32_t service_type, const uint32_t *args);
++
++int push_output_event(display_ctx *ctx, const struct OutputEvent *event);
++//接收到输出事件时，可能会有额外的数据需要接收，所以增加一个带长度的版本
++//但是发送方必须设置变长事件的size字段，表示随后数据的大小，而且必须紧跟事件发送数据
++//变长事件不得使用push_output_event发送，必须使用push_output_event_with_length发送
++//接收端使用标准事件接收后根据size字段知道后续数据的大小，务必使用socket手动接收变长数据（必须有超时，避免对端挂掉）
++int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *event, void* payload, size_t size);
++/* Register a callback invoked when the consumer is lost and the context drops
++ * back to fallback. */
++int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);
++
++bool is_fallback(display_ctx *ctx);
++void force_fallback(display_ctx *ctx);
++
++/* Attempt to leave fallback: pick up the consumer fds and immediately receive the
++ * dmabuf set (the consumer sends the dmabufs right after the fd handshake). Clears
++ * fallback only when BOTH the fds and the dmabufs are in hand, so on a 0 return the
++ * dmabufs are ready to import right away. Returns 0 on success, -1 if there is
++ * still no consumer (stays in fallback; safe to retry on the next tick). */
++int  try_exit_fallback(display_ctx *ctx);
++
++int  get_data_fd(display_ctx *ctx);
++/* Current local end of the audio socketpair, or -1 in fallback. Changes across
++ * reconnects; re-point the audio engine on each exit/enter fallback. */
++int  get_audio_fd(display_ctx *ctx);
++int  get_buffer_ready_fd(display_ctx *ctx);
++int  get_buf_count(display_ctx *ctx);
++int  get_selected_idx(display_ctx *ctx);
++int  get_dmabuf_fd(display_ctx *ctx);
++int  get_dmabuf_fd_at(display_ctx *ctx, int idx);
++int  get_dmabuf_info(display_ctx *ctx, struct buf_info *info);
++int  get_dmabuf_info_at(display_ctx *ctx, int idx, struct buf_info *info);
++
++#endif
+diff --git a/backend/anland/input.c b/backend/anland/input.c
+new file mode 100644
+index 0000000..6954c17
+--- /dev/null
++++ b/backend/anland/input.c
+@@ -0,0 +1,216 @@
++#include <linux/input-event-codes.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++#include <wayland-server-protocol.h>
++#include <wlr/interfaces/wlr_keyboard.h>
++#include <wlr/interfaces/wlr_pointer.h>
++#include <wlr/interfaces/wlr_touch.h>
++#include <wlr/util/log.h>
++
++#include "anland.h"
++#include "types/wlr_output.h"
++#include "util/time.h"
++
++#define MAX_EXTENDED_INPUT_SIZE (1024U * 1024U)
++#define MAX_RESOURCE_FDS 9
++
++static void handle_pointer_motion(struct wlr_anland_backend *backend,
++		const struct InputEvent *event) {
++	struct wlr_pointer *pointer = &backend->pointer;
++	uint32_t time = (uint32_t)get_current_time_msec();
++	struct wlr_pointer_motion_absolute_event absolute = {
++		.pointer = pointer,
++		.time_msec = time,
++		.x = event->pointer_motion.x / (double)backend->screen_width,
++		.y = event->pointer_motion.y / (double)backend->screen_height,
++	};
++	struct wlr_pointer_motion_event relative = {
++		.pointer = pointer,
++		.time_msec = time,
++		.delta_x = event->pointer_motion.dx,
++		.delta_y = event->pointer_motion.dy,
++		.unaccel_dx = event->pointer_motion.dx,
++		.unaccel_dy = event->pointer_motion.dy,
++	};
++	wl_signal_emit_mutable(&pointer->events.motion_absolute, &absolute);
++	wl_signal_emit_mutable(&pointer->events.motion, &relative);
++	wl_signal_emit_mutable(&pointer->events.frame, pointer);
++}
++
++static void handle_pointer_button(struct wlr_anland_backend *backend,
++		const struct InputEvent *event) {
++	struct wlr_pointer_button_event button = {
++		.pointer = &backend->pointer,
++		.time_msec = (uint32_t)get_current_time_msec(),
++		.button = event->pointer_button.button,
++		.state = event->pointer_button.pressed ?
++			WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED,
++	};
++	wl_signal_emit_mutable(&backend->pointer.events.button, &button);
++	wl_signal_emit_mutable(&backend->pointer.events.frame, &backend->pointer);
++}
++
++static void handle_pointer_axis(struct wlr_anland_backend *backend,
++		const struct InputEvent *event) {
++	struct wlr_pointer_axis_event axis = {
++		.pointer = &backend->pointer,
++		.time_msec = (uint32_t)get_current_time_msec(),
++		.source = WL_POINTER_AXIS_SOURCE_WHEEL,
++		.orientation = event->pointer_axis.axis == 0 ?
++			WL_POINTER_AXIS_VERTICAL_SCROLL : WL_POINTER_AXIS_HORIZONTAL_SCROLL,
++		.delta = event->pointer_axis.value,
++		.delta_discrete = event->pointer_axis.discrete * WLR_POINTER_AXIS_DISCRETE_STEP,
++	};
++	wl_signal_emit_mutable(&backend->pointer.events.axis, &axis);
++	wl_signal_emit_mutable(&backend->pointer.events.frame, &backend->pointer);
++}
++
++static void handle_key(struct wlr_anland_backend *backend,
++		const struct InputEvent *event) {
++	struct wlr_keyboard_key_event key = {
++		.keycode = (uint32_t)event->key.keycode,
++		.time_msec = (uint32_t)get_current_time_msec(),
++		.state = event->key.action == INPUT_ACTION_DOWN ?
++			WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED,
++		.update_state = true,
++	};
++	wlr_keyboard_notify_key(&backend->keyboard, &key);
++}
++
++static void handle_touch(struct wlr_anland_backend *backend,
++		const struct InputEvent *event) {
++	struct wlr_touch *touch = &backend->touch;
++	uint32_t time = (uint32_t)get_current_time_msec();
++	switch (event->touch.action) {
++	case INPUT_ACTION_DOWN: {
++		struct wlr_touch_down_event down = {
++			.touch = touch,
++			.time_msec = time,
++			.touch_id = event->touch.pointer_id,
++			.x = event->touch.x / (double)backend->screen_width,
++			.y = event->touch.y / (double)backend->screen_height,
++		};
++		wl_signal_emit_mutable(&touch->events.down, &down);
++		break;
++	}
++	case INPUT_ACTION_UP: {
++		struct wlr_touch_up_event up = {
++			.touch = touch,
++			.time_msec = time,
++			.touch_id = event->touch.pointer_id,
++		};
++		wl_signal_emit_mutable(&touch->events.up, &up);
++		break;
++	}
++	case INPUT_ACTION_MOVE: {
++		struct wlr_touch_motion_event motion = {
++			.touch = touch,
++			.time_msec = time,
++			.touch_id = event->touch.pointer_id,
++			.x = event->touch.x / (double)backend->screen_width,
++			.y = event->touch.y / (double)backend->screen_height,
++		};
++		wl_signal_emit_mutable(&touch->events.motion, &motion);
++		break;
++	}
++	default:
++		break;
++	}
++}
++
++static void handle_display_refresh(struct wlr_anland_backend *backend,
++		const struct InputEvent *event) {
++	if (event->display.refresh_mhz < 1000 ||
++			event->display.refresh_mhz > 1000000 || !backend->output) {
++		return;
++	}
++	if (backend->refresh == event->display.refresh_mhz) {
++		return;
++	}
++	backend->refresh = event->display.refresh_mhz;
++	struct wlr_output_state state;
++	wlr_output_state_init(&state);
++	wlr_output_state_set_custom_mode(&state,
++		backend->output->wlr_output.width,
++		backend->output->wlr_output.height,
++		(int32_t)backend->refresh);
++	wlr_output_send_request_state(&backend->output->wlr_output, &state);
++	wlr_output_state_finish(&state);
++}
++
++static void drain_payload(struct wlr_anland_backend *backend, uint32_t size,
++		const char *what) {
++	if (size > MAX_EXTENDED_INPUT_SIZE) {
++		wlr_log(WLR_ERROR, "Discarding oversized Anland %s payload (%u bytes)",
++			what, size);
++	}
++	uint8_t buffer[4096];
++	while (size > 0) {
++		size_t chunk = size < sizeof(buffer) ? size : sizeof(buffer);
++		if (poll_input_event_extend_data(backend->display, buffer, chunk, 100) != 1) {
++			return;
++		}
++		size -= (uint32_t)chunk;
++	}
++}
++
++static void handle_resource(struct wlr_anland_backend *backend,
++		const struct InputEvent *event) {
++	uint32_t expected = event->resource.fdnum;
++	if (expected == 0 || expected > MAX_RESOURCE_FDS) {
++		drain_payload(backend, 0, "resource");
++		return;
++	}
++	int fds[MAX_RESOURCE_FDS];
++	int count = 0;
++	if (poll_input_event_extend_fds(backend->display, fds, expected,
++			&count, 100) != 1) {
++		return;
++	}
++	for (int i = 0; i < count; i++) {
++		close(fds[i]);
++	}
++}
++
++void anland_process_input_event(struct wlr_anland_backend *backend,
++		const struct InputEvent *event) {
++	switch (event->type) {
++	case INPUT_TYPE_POINTER_MOTION:
++		handle_pointer_motion(backend, event);
++		break;
++	case INPUT_TYPE_POINTER_BUTTON:
++		handle_pointer_button(backend, event);
++		break;
++	case INPUT_TYPE_POINTER_AXIS:
++		handle_pointer_axis(backend, event);
++		break;
++	case INPUT_TYPE_KEY:
++		handle_key(backend, event);
++		break;
++	case INPUT_TYPE_TOUCH:
++		handle_touch(backend, event);
++		break;
++	case INPUT_TYPE_TOUCH_FRAME:
++		wl_signal_emit_mutable(&backend->touch.events.frame, &backend->touch);
++		break;
++	case INPUT_TYPE_DISPLAY_REFRESH:
++		handle_display_refresh(backend, event);
++		break;
++	case INPUT_TYPE_CLIPBOARD:
++		drain_payload(backend, event->clipboard.size, "clipboard");
++		break;
++	case INPUT_TYPE_TEXT_INPUT:
++		drain_payload(backend, event->text_input.size, "text input");
++		break;
++	case INPUT_TYPE_RESOURCE:
++		handle_resource(backend, event);
++		break;
++	case INPUT_TYPE_ACTION:
++		break;
++	default:
++		wlr_log(WLR_DEBUG, "Ignoring unknown Anland input type %u", event->type);
++		break;
++	}
++}
+diff --git a/backend/anland/meson.build b/backend/anland/meson.build
+new file mode 100644
+index 0000000..87a4a36
+--- /dev/null
++++ b/backend/anland/meson.build
+@@ -0,0 +1,9 @@
++wlr_files += files(
++	'backend.c',
++	'allocator.c',
++	'display_producer.c',
++	'input.c',
++	'output.c',
++	'socket_utils.c',
++)
++features += {'anland-backend': true}
+diff --git a/backend/anland/output.c b/backend/anland/output.c
+new file mode 100644
+index 0000000..c36ac1a
+--- /dev/null
++++ b/backend/anland/output.c
+@@ -0,0 +1,156 @@
++#include <assert.h>
++#include <drm_fourcc.h>
++#include <stdlib.h>
++
++#include <wlr/interfaces/wlr_output.h>
++#include <wlr/render/swapchain.h>
++#include <wlr/types/wlr_output_layer.h>
++#include <wlr/util/log.h>
++
++#include "anland.h"
++#include "types/wlr_output.h"
++
++static const uint32_t supported_output_state =
++	WLR_OUTPUT_STATE_BACKEND_OPTIONAL |
++	WLR_OUTPUT_STATE_BUFFER |
++	WLR_OUTPUT_STATE_ENABLED |
++	WLR_OUTPUT_STATE_MODE;
++
++struct wlr_anland_output *anland_output_from_output(
++		struct wlr_output *wlr_output) {
++	assert(wlr_output_is_anland(wlr_output));
++	struct wlr_anland_output *output =
++		wl_container_of(wlr_output, output, wlr_output);
++	return output;
++}
++
++static bool output_test(struct wlr_output *wlr_output,
++		const struct wlr_output_state *state) {
++	struct wlr_anland_output *output = anland_output_from_output(wlr_output);
++
++	uint32_t unsupported = state->committed & ~supported_output_state;
++	if (unsupported != 0) {
++		wlr_log(WLR_DEBUG, "Anland output state has unsupported fields: 0x%08x",
++			unsupported);
++		return false;
++	}
++
++	if (state->committed & WLR_OUTPUT_STATE_MODE) {
++		assert(state->mode_type == WLR_OUTPUT_STATE_MODE_CUSTOM);
++		if (state->custom_mode.width <= 0 || state->custom_mode.height <= 0) {
++			return false;
++		}
++	}
++
++	if (state->committed & WLR_OUTPUT_STATE_BUFFER) {
++		if (!anland_buffer_is(state->buffer)) {
++			wlr_log(WLR_DEBUG, "Anland requires DMA-BUF output buffers");
++			return false;
++		}
++		if (state->buffer->width != wlr_output->width ||
++				state->buffer->height != wlr_output->height) {
++			return false;
++		}
++		if (anland_buffer_index(state->buffer) < 0 ||
++				anland_buffer_index(state->buffer) >= get_buf_count(output->backend->display)) {
++			return false;
++		}
++	}
++
++	if (state->committed & WLR_OUTPUT_STATE_LAYERS) {
++		for (size_t i = 0; i < state->layers_len; i++) {
++			state->layers[i].accepted = false;
++		}
++	}
++
++	return true;
++}
++
++static bool output_commit(struct wlr_output *wlr_output,
++		const struct wlr_output_state *state) {
++	struct wlr_anland_output *output = anland_output_from_output(wlr_output);
++	if (!output_test(wlr_output, state)) {
++		return false;
++	}
++
++	if (state->committed & WLR_OUTPUT_STATE_MODE) {
++		/* The consumer reports refresh in milli-Hz. A mode refresh of zero
++		 * means that the daemon's current value should be retained. */
++		if (state->custom_mode.refresh > 0) {
++			output->backend->refresh = (uint32_t)state->custom_mode.refresh;
++		}
++	}
++
++	if ((state->committed & WLR_OUTPUT_STATE_BUFFER) &&
++			!is_fallback(output->backend->display)) {
++		if (trigger_refresh(output->backend->display) < 0) {
++			return false;
++		}
++		/* The daemon rotates buffers before signalling buffer-ready. The
++		 * allocator creates the next frame's buffer for that selected index,
++		 * so this slot is immediately reusable after the fence message. */
++		wl_signal_emit_mutable(&state->buffer->events.release, state->buffer);
++		output_defer_present(wlr_output, (struct wlr_output_event_present){
++			.commit_seq = wlr_output->commit_seq + 1,
++			.presented = true,
++		});
++	}
++
++	return true;
++}
++
++static void output_destroy(struct wlr_output *wlr_output) {
++	struct wlr_anland_output *output = anland_output_from_output(wlr_output);
++	wl_list_remove(&output->link);
++	free(output);
++}
++
++static const struct wlr_output_impl output_impl = {
++	.destroy = output_destroy,
++	.test = output_test,
++	.commit = output_commit,
++};
++
++bool wlr_output_is_anland(struct wlr_output *output) {
++	return output->impl == &output_impl;
++}
++
++void anland_output_drop_swapchain(struct wlr_anland_output *output) {
++	wlr_swapchain_destroy(output->wlr_output.swapchain);
++	output->wlr_output.swapchain = NULL;
++}
++
++void anland_output_send_frame(struct wlr_anland_output *output) {
++	if (output->wlr_output.enabled && !output->wlr_output.frame_pending) {
++		wlr_output_send_frame(&output->wlr_output);
++	}
++}
++
++struct wlr_anland_output *wlr_anland_output_create(
++		struct wlr_anland_backend *backend) {
++	struct wlr_anland_output *output = calloc(1, sizeof(*output));
++	if (!output) {
++		return NULL;
++	}
++
++	struct wlr_output_state state;
++	wlr_output_state_init(&state);
++	wlr_output_state_set_custom_mode(&state, backend->screen_width,
++		backend->screen_height, (int32_t)backend->refresh);
++	wlr_output_init(&output->wlr_output, &backend->backend, &output_impl,
++		backend->event_loop, &state);
++	wlr_output_state_finish(&state);
++
++	output->backend = backend;
++	output->wlr_output.render_format = backend->pixel_format == 1 ?
++		DRM_FORMAT_ABGR8888 : DRM_FORMAT_XRGB8888;
++	output->wlr_output.scale = backend->scale;
++	wlr_output_set_name(&output->wlr_output, "ANLAND-1");
++	wlr_output_set_description(&output->wlr_output, "Anland display");
++	output->wlr_output.make = strdup("Anland");
++	output->wlr_output.model = strdup("Anland");
++
++	wl_list_insert(&backend->outputs, &output->link);
++	backend->output = output;
++	return output;
++}
+diff --git a/backend/anland/protocol.h b/backend/anland/protocol.h
+new file mode 100644
+index 0000000..8db131b
+--- /dev/null
++++ b/backend/anland/protocol.h
+@@ -0,0 +1,192 @@
++#ifndef DISPLAY_PROTOCOL_H
++#define DISPLAY_PROTOCOL_H
++
++#include <stdint.h>
++
++#define CTRL_MSG_CONSUMER_HELLO  1
++#define CTRL_MSG_PRODUCER_HELLO  2
++#define CTRL_MSG_SCREEN_INFO     7
++#define CTRL_MSG_REJECT          8
++#define CTRL_MSG_PICKUP_FDS      9
++#define CTRL_MSG_FDS_READY      10
++
++#define DATA_MSG_BUF_READY       100
++#define DATA_MSG_REFRESH_DONE    101
++#define DATA_MSG_INPUT_EVENT     102
++#define DATA_MSG_OUTPUT_EVENT    103
++#define DATA_MSG_INPUT_EXTEND_FDS  104
++#define DATA_MSG_BUFS_READY      200
++
++#define MAX_BUFS 8
++
++struct ctrl_msg {
++    uint32_t type;
++    uint32_t size;
++    uint8_t  payload[];
++} __attribute__((packed));
++
++struct data_msg {
++    uint32_t type;
++    uint32_t size;
++    uint8_t  payload[];
++} __attribute__((packed));
++
++struct screen_info {
++    uint32_t width;
++    uint32_t height;
++    uint32_t format;
++    uint32_t refresh;
++} __attribute__((packed));
++
++struct buf_info {
++    uint32_t stride;
++    uint32_t width;      /* buffer logical width  (consumer-side native resolution) */
++    uint32_t height;     /* buffer logical height (consumer-side native resolution) */
++    uint32_t format;
++    uint64_t modifier;
++    uint32_t offset;
++} __attribute__((packed));
++
++#define INPUT_TYPE_TOUCH          1
++#define INPUT_TYPE_KEY            2
++#define INPUT_TYPE_POINTER_MOTION 3
++#define INPUT_TYPE_POINTER_BUTTON 4
++#define INPUT_TYPE_POINTER_AXIS   5
++#define INPUT_TYPE_TOUCH_FRAME    6
++/* Not really input: the consumer reports its current display refresh rate over
++ * the same data channel so the producer can repace its RenderLoop at runtime.
++ * Deliberately reuses the InputEvent framing (DATA_MSG_INPUT_EVENT) so the
++ * producer's poll_input_event() drains it like any other event instead of
++ * stalling the stream on an unknown DATA_MSG_* header. */
++#define INPUT_TYPE_DISPLAY_REFRESH 7
++#define INPUT_TYPE_CLIPBOARD      8
++#define INPUT_TYPE_TEXT_INPUT      9
++#define INPUT_TYPE_ACTION 10
++#define INPUT_TYPE_RESOURCE 11
++
++#define SERVICE_TYPE_CAMERA 1
++
++#define INPUT_ACTION_DOWN    0
++
++#define INPUT_ACTION_DOWN    0
++#define INPUT_ACTION_UP      1
++#define INPUT_ACTION_MOVE    2
++
++#define OUTPUT_TYPE_CLIPBOARD 1
++#define OUTPUT_TYPE_RESOURCES_REQUEST 2
++
++
++
++struct InputEvent {
++    uint32_t type;
++    union {
++        struct {
++            int32_t  action;
++            float    x;
++            float    y;
++            int32_t  pointer_id;
++        } touch;
++        struct {
++            int32_t  action;
++            int32_t  keycode;
++        } key;
++        struct {
++            float    x;
++            float    y;
++            float    dx;
++            float    dy;
++        } pointer_motion;
++        struct {
++            uint32_t button;
++            int32_t  pressed;
++        } pointer_button;
++        struct {
++            uint32_t axis;
++            float    value;
++            int32_t  discrete;
++        } pointer_axis;
++        struct {
++            uint32_t refresh_mhz; // current display refresh rate, milli-Hz
++        } display;
++        struct {
++            uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
++        } clipboard;
++        struct {
++            uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
++        } text_input;
++        struct {
++            uint32_t action;
++            int32_t value;
++        } input_action;
++        struct {
++            uint32_t type;
++            uint32_t fdnum;//fdnum是fd的数量,后续会有fdnum个fd跟随在这个结构体后面
++        } resource;
++        struct {
++            uint32_t padding[4];
++        };
++    };
++} __attribute__((packed));
++
++struct OutputEvent{
++    uint32_t type;
++    union {
++        struct {
++            uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
++        } clipboard;
++        struct {
++            uint32_t type;
++            uint32_t args[3]; //support 3 args
++        } resources_request;
++        struct
++        {
++            uint32_t padding[4];
++        };
++
++    };
++} __attribute__((packed));
++
++/*
++ * Audio runs on its own dedicated bidirectional socketpair (hello fd slot 4),
++ * deliberately kept off the data channel so a burst of PCM never head-of-line
++ * blocks input/clipboard. The socket is full duplex: the producer writes desktop
++ * playback PCM that the consumer reads, and the consumer writes microphone PCM
++ * that the producer reads -- each side only ever reads what the other wrote.
++ * Every direction sends one AUDIO_MSG_FORMAT, then a stream of AUDIO_MSG_PCM.
++ *
++ * PCM is interleaved per frame. For stereo (channels == 2) the sample order
++ * within each frame is LEFT then RIGHT, i.e. channel positions FL, FR -- the
++ * producer's SPA channel map and the consumer's AAudio stereo layout must both
++ * honour this order so the left/right channels are never swapped.
++ *
++ * Audio quality is negotiated, not pinned: the consumer owns the real hardware,
++ * so on connect it opens its AAudio streams, reads back the rate/channels the
++ * device actually chose, and sends one AUDIO_MSG_FORMAT per direction (tagged with
++ * role) to the producer. The producer builds its PipeWire sink/source to match,
++ * so neither side resamples blindly and the PCM byte math lines up on both ends.
++ */
++#define AUDIO_MSG_FORMAT 1
++#define AUDIO_MSG_PCM    2
++
++/* PCM sample format codes for struct audio_format.format. */
++#define AUDIO_FORMAT_S16LE 0
++
++/* Which direction a struct audio_format describes. */
++#define AUDIO_ROLE_PLAYBACK 0   /* producer -> consumer (desktop sound -> speaker) */
++#define AUDIO_ROLE_CAPTURE  1   /* consumer -> producer (mic -> virtual source)    */
++
++struct audio_format {
++    uint32_t rate;       /* frames per second the device chose, e.g. 48000 / 44100 */
++    uint32_t channels;   /* interleaved; stereo is L,R (FL,FR) */
++    uint32_t format;     /* AUDIO_FORMAT_* */
++    uint32_t role;       /* AUDIO_ROLE_* -- which direction this describes */
++    uint32_t quantum;    /* requested buffer in frames (latency preset); 0 = engine default */
++} __attribute__((packed));
++
++struct audio_msg {
++    uint32_t type;       /* AUDIO_MSG_FORMAT | AUDIO_MSG_PCM */
++    uint32_t size;       /* payload bytes that follow this header */
++} __attribute__((packed));
++
++
++#endif
+diff --git a/backend/anland/socket_utils.c b/backend/anland/socket_utils.c
+new file mode 100644
+index 0000000..1b4ef31
+--- /dev/null
++++ b/backend/anland/socket_utils.c
+@@ -0,0 +1,121 @@
++#include "socket_utils.h"
++
++#include <errno.h>
++#include <stdint.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++int send_fds(int sock, const void *data, size_t data_len,
++             const int *fds, int fd_count)
++{
++    struct iovec iov = {
++        .iov_base = (void *)data,
++        .iov_len  = data_len,
++    };
++
++    char cmsg_buf[CMSG_SPACE(sizeof(int) * fd_count)];
++    memset(cmsg_buf, 0, sizeof(cmsg_buf));
++
++    struct msghdr msg = {
++        .msg_iov        = &iov,
++        .msg_iovlen     = 1,
++        .msg_control    = cmsg_buf,
++        .msg_controllen = sizeof(cmsg_buf),
++    };
++
++    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++    cmsg->cmsg_level = SOL_SOCKET;
++    cmsg->cmsg_type  = SCM_RIGHTS;
++    cmsg->cmsg_len   = CMSG_LEN(sizeof(int) * fd_count);
++    memcpy(CMSG_DATA(cmsg), fds, sizeof(int) * fd_count);
++
++    ssize_t n = sendmsg(sock, &msg, MSG_NOSIGNAL);
++    return (n == (ssize_t)data_len) ? 0 : -1;
++}
++
++int recv_fds(int sock, void *data, size_t data_len,
++             int *fds, int fd_count, int *fds_received)
++{
++    struct iovec iov = {
++        .iov_base = data,
++        .iov_len  = data_len,
++    };
++
++    char cmsg_buf[CMSG_SPACE(sizeof(int) * fd_count)];
++    memset(cmsg_buf, 0, sizeof(cmsg_buf));
++
++    struct msghdr msg = {
++        .msg_iov        = &iov,
++        .msg_iovlen     = 1,
++        .msg_control    = cmsg_buf,
++        .msg_controllen = sizeof(cmsg_buf),
++    };
++
++    ssize_t n = recvmsg(sock, &msg, 0);
++    if (n <= 0)
++        return -1;
++
++    *fds_received = 0;
++    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++    if (cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
++        int count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
++        if (count > fd_count)
++            count = fd_count;
++        memcpy(fds, CMSG_DATA(cmsg), sizeof(int) * count);
++        *fds_received = count;
++    }
++
++    return (int)n;
++}
++
++int connect_unix(const char *path)
++{
++    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (fd < 0)
++        return -1;
++
++    struct sockaddr_un addr;
++    memset(&addr, 0, sizeof(addr));
++    addr.sun_family = AF_UNIX;
++    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
++
++    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
++        close(fd);
++        return -1;
++    }
++    return fd;
++}
++
++int send_all(int fd, const void *buf, size_t len)
++{
++    const uint8_t *p = buf;
++    size_t sent = 0;
++    while (sent < len) {
++        ssize_t n = send(fd, p + sent, len - sent, MSG_NOSIGNAL);
++        if (n <= 0) {
++            if (n < 0 && errno == EINTR)
++                continue;
++            return -1;
++        }
++        sent += n;
++    }
++    return 0;
++}
++
++int recv_all(int fd, void *buf, size_t len)
++{
++    uint8_t *p = buf;
++    size_t got = 0;
++    while (got < len) {
++        ssize_t n = recv(fd, p + got, len - got, 0);
++        if (n <= 0) {
++            if (n < 0 && errno == EINTR)
++                continue;
++            return -1;
++        }
++        got += n;
++    }
++    return 0;
++}
+diff --git a/backend/anland/socket_utils.h b/backend/anland/socket_utils.h
+new file mode 100644
+index 0000000..06ba8f4
+--- /dev/null
++++ b/backend/anland/socket_utils.h
+@@ -0,0 +1,18 @@
++#ifndef DISPLAY_SOCKET_UTILS_H
++#define DISPLAY_SOCKET_UTILS_H
++
++#include <stddef.h>
++
++int send_fds(int sock, const void *data, size_t data_len,
++             const int *fds, int fd_count);
++
++int recv_fds(int sock, void *data, size_t data_len,
++             int *fds, int fd_count, int *fds_received);
++
++int connect_unix(const char *path);
++
++int send_all(int fd, const void *buf, size_t len);
++
++int recv_all(int fd, void *buf, size_t len);
++
++#endif
+diff --git a/backend/backend.c b/backend/backend.c
+index 3d84aa6..6669306 100644
+--- a/backend/backend.c
++++ b/backend/backend.c
+@@ -5,6 +5,7 @@
+ #include <wayland-server-core.h>
+ 
+ #include <wlr/backend/headless.h>
++#include <wlr/backend/anland.h>
+ #include <wlr/backend/interface.h>
+ #include <wlr/backend/multi.h>
+ #include <wlr/backend/wayland.h>
+@@ -32,6 +33,10 @@
+ #include <wlr/backend/x11.h>
+ #endif
+ 
++#if WLR_HAS_ANLAND_BACKEND
++#include <wlr/backend/anland.h>
++#endif
++
+ #define WAIT_SESSION_TIMEOUT 10000 // ms
+ 
+ void wlr_backend_init(struct wlr_backend *backend,
+@@ -232,6 +237,15 @@ static struct wlr_backend *attempt_headless_backend(struct wl_event_loop *loop)
+ 	return backend;
+ }
+ 
++static struct wlr_backend *attempt_anland_backend(struct wl_event_loop *loop) {
++#if WLR_HAS_ANLAND_BACKEND
++	return wlr_anland_backend_create(loop, getenv("ANLAND_SOCKET"));
++#else
++	wlr_log(WLR_ERROR, "Cannot create Anland backend: disabled at compile-time");
++	return NULL;
++#endif
++}
++
+ static struct wlr_backend *attempt_drm_backend(struct wlr_backend *backend, struct wlr_session *session) {
+ #if WLR_HAS_DRM_BACKEND
+ 	struct wlr_device *gpus[8];
+@@ -297,6 +311,8 @@ static bool attempt_backend_by_name(struct wl_event_loop *loop,
+ 		backend = attempt_x11_backend(loop, NULL);
+ 	} else if (strcmp(name, "headless") == 0) {
+ 		backend = attempt_headless_backend(loop);
++	} else if (strcmp(name, "anland") == 0) {
++		backend = attempt_anland_backend(loop);
+ 	} else if (strcmp(name, "drm") == 0 || strcmp(name, "libinput") == 0) {
+ 		// DRM and libinput need a session
+ 		if (*session_ptr == NULL) {
+@@ -364,6 +380,18 @@ struct wlr_backend *wlr_backend_autocreate(struct wl_event_loop *loop,
+ 		goto success;
+ 	}
+ 
++	if (getenv("ANLAND_SOCKET")) {
++		struct wlr_backend *anland = attempt_anland_backend(loop);
++		if (!anland) {
++			goto error;
++		}
++		wlr_multi_backend_add(multi, anland);
++		if (!auto_backend_monitor_create(multi, anland)) {
++			goto error;
++		}
++		goto success;
++	}
++
+ 	if (getenv("WAYLAND_DISPLAY") || getenv("WAYLAND_SOCKET")) {
+ 		struct wlr_backend *wl_backend = attempt_wl_backend(loop);
+ 		if (!wl_backend) {
+diff --git a/backend/meson.build b/backend/meson.build
+index ed977d3..2554480 100644
+--- a/backend/meson.build
++++ b/backend/meson.build
+@@ -1,6 +1,6 @@
+ wlr_files += files('backend.c')
+ 
+-all_backends = ['drm', 'libinput', 'x11']
++all_backends = ['drm', 'libinput', 'x11', 'anland']
+ backends = get_option('backends')
+ if 'auto' in backends and get_option('auto_features').enabled()
+ 	backends = all_backends
+diff --git a/include/meson.build b/include/meson.build
+index 165166c..5f25ca9 100644
+--- a/include/meson.build
++++ b/include/meson.build
+@@ -8,6 +8,9 @@ endif
+ if not features.get('libinput-backend')
+ 	exclude_files += 'backend/libinput.h'
+ endif
++if not features.get('anland-backend')
++	exclude_files += 'backend/anland.h'
++endif
+ if not features.get('x11-backend')
+ 	exclude_files += 'backend/x11.h'
+ endif
+diff --git a/include/types/wlr_output.h b/include/types/wlr_output.h
+index b0acac4..8b9ad07 100644
+--- a/include/types/wlr_output.h
++++ b/include/types/wlr_output.h
+@@ -22,6 +22,8 @@ bool output_cursor_set_texture(struct wlr_output_cursor *cursor,
+ 	uint64_t wait_point);
+ 
+ void output_defer_present(struct wlr_output *output, struct wlr_output_event_present event);
++void wlr_output_send_request_state(struct wlr_output *output,
++	const struct wlr_output_state *state);
+ 
+ bool output_prepare_commit(struct wlr_output *output, const struct wlr_output_state *state);
+ void output_apply_commit(struct wlr_output *output, const struct wlr_output_state *state);
+diff --git a/include/wlr/backend/anland.h b/include/wlr/backend/anland.h
+new file mode 100644
+index 0000000..a989e62
+--- /dev/null
++++ b/include/wlr/backend/anland.h
+@@ -0,0 +1,28 @@
++/*
++ * This an unstable interface of wlroots. No guarantees are made regarding
++ * the future consistency of this API.
++ */
++#ifndef WLR_USE_UNSTABLE
++#error "Add -DWLR_USE_UNSTABLE to enable unstable wlroots features"
++#endif
++
++#ifndef WLR_BACKEND_ANLAND_H
++#define WLR_BACKEND_ANLAND_H
++
++#include <wlr/backend.h>
++
++/**
++ * Create a backend which renders into the buffers exported by Anland's
++ * display daemon. The daemon socket defaults to /tmp/display_daemon.sock.
++ */
++struct wlr_backend *wlr_anland_backend_create(struct wl_event_loop *loop,
++	const char *socket_path);
++
++bool wlr_backend_is_anland(struct wlr_backend *backend);
++bool wlr_output_is_anland(struct wlr_output *output);
++
++/** Return the allocator owned by an Anland backend. */
++struct wlr_allocator *wlr_anland_backend_get_allocator(
++	struct wlr_backend *backend);
++
++#endif
+diff --git a/include/wlr/config.h.in b/include/wlr/config.h.in
+index ef18634..4d5b97d 100644
+--- a/include/wlr/config.h.in
++++ b/include/wlr/config.h.in
+@@ -15,6 +15,11 @@
+  * Required for <wlr/backend/libinput.h>.
+  */
+ #mesondefine WLR_HAS_LIBINPUT_BACKEND
++/**
++ * Whether the Anland backend is compile-time enabled. Equivalent to the
++ * pkg-config "have_anland_backend" variable.
++ */
++#mesondefine WLR_HAS_ANLAND_BACKEND
+ /**
+  * Whether the X11 backend is compile-time enabled. Equivalent to the
+  * pkg-config "have_x11_backend" variable.
+diff --git a/meson.build b/meson.build
+index 75682e6..e38df00 100644
+--- a/meson.build
++++ b/meson.build
+@@ -70,6 +70,7 @@ features = {
+ 	'drm-backend': false,
+ 	'x11-backend': false,
+ 	'libinput-backend': false,
++	'anland-backend': false,
+ 	'xwayland': false,
+ 	'gles2-renderer': false,
+ 	'vulkan-renderer': false,
+diff --git a/meson.options b/meson.options
+index 5863764..0166578 100644
+--- a/meson.options
++++ b/meson.options
+@@ -3,7 +3,7 @@ option('xwayland', type: 'feature', value: 'auto', yield: true, description: 'En
+ option('examples', type: 'boolean', value: true, description: 'Build example applications')
+ option('icon_directory', description: 'Location used to look for cursors (default: ${datadir}/icons)', type: 'string', value: '')
+ option('renderers', type: 'array', choices: ['auto', 'gles2', 'vulkan'], value: ['auto'], description: 'Select built-in renderers')
+-option('backends', type: 'array', choices: ['auto', 'drm', 'libinput', 'x11'], value: ['auto'], description: 'Select built-in backends')
++option('backends', type: 'array', choices: ['auto', 'drm', 'libinput', 'x11', 'anland'], value: ['auto'], description: 'Select built-in backends')
+ option('allocators', type: 'array', choices: ['auto', 'gbm', 'udmabuf'], value: ['auto'],
+ 	description: 'Select built-in allocators')
+ option('session', type: 'feature', value: 'auto', description: 'Enable session support')

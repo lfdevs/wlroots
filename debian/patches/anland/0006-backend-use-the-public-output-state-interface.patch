@@ -1,0 +1,35 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 04:18:59 +0800
+Subject: backend: use the public output state interface
+
+Include the existing output request-state declaration from the public interface header instead of duplicating it in wlroots' internal output header.
+---
+ backend/anland/input.c     | 1 +
+ include/types/wlr_output.h | 2 --
+ 2 files changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/backend/anland/input.c b/backend/anland/input.c
+index 5cba3c6..b58e275 100644
+--- a/backend/anland/input.c
++++ b/backend/anland/input.c
+@@ -5,6 +5,7 @@
+ 
+ #include <wayland-server-protocol.h>
+ #include <wlr/interfaces/wlr_keyboard.h>
++#include <wlr/interfaces/wlr_output.h>
+ #include <wlr/interfaces/wlr_pointer.h>
+ #include <wlr/interfaces/wlr_touch.h>
+ #include <wlr/util/log.h>
+diff --git a/include/types/wlr_output.h b/include/types/wlr_output.h
+index 8b9ad07..b0acac4 100644
+--- a/include/types/wlr_output.h
++++ b/include/types/wlr_output.h
+@@ -22,8 +22,6 @@ bool output_cursor_set_texture(struct wlr_output_cursor *cursor,
+ 	uint64_t wait_point);
+ 
+ void output_defer_present(struct wlr_output *output, struct wlr_output_event_present event);
+-void wlr_output_send_request_state(struct wlr_output *output,
+-	const struct wlr_output_state *state);
+ 
+ bool output_prepare_commit(struct wlr_output *output, const struct wlr_output_state *state);
+ void output_apply_commit(struct wlr_output *output, const struct wlr_output_state *state);
