@@ -12,3 +12,4 @@ anland/0010-backend-handle-Anland-fence-send-failures.patch
 anland/0011-backend-harden-Anland-stream-framing.patch
 anland/0012-backend-make-Anland-fd-passing-atomic.patch
 anland/0013-backend-silence-PipeWire-header-aliasing-warnings.patch
+anland/0014-backend-adapt-Anland-to-wlroots-0.19-APIs.patch
