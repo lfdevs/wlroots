@@ -1,0 +1,228 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 03:57:05 +0800
+Subject: render: use surfaceless EGL for Anland
+
+Allow the Anland backend to create a GLES renderer without a DRM device, using EGL_MESA_platform_surfaceless. Route allocator autocreation to Anland's imported DMA-BUF allocator, including when the backend is wrapped by a multi-backend.
+---
+ backend/anland/allocator.c   | 13 ++++++++++++-
+ backend/anland/anland.h      |  1 +
+ backend/anland/backend.c     |  3 +++
+ include/render/egl.h         |  1 +
+ render/allocator/allocator.c | 25 +++++++++++++++++++++++++
+ render/egl.c                 | 14 ++++++++++++++
+ render/wlr_renderer.c        | 30 ++++++++++++++++++++++++++++++
+ 7 files changed, 86 insertions(+), 1 deletion(-)
+
+diff --git a/backend/anland/allocator.c b/backend/anland/allocator.c
+index 276b2b2..4998d34 100644
+--- a/backend/anland/allocator.c
++++ b/backend/anland/allocator.c
+@@ -54,7 +54,7 @@ static struct wlr_buffer *allocator_create_buffer(
+ 		wl_container_of(wlr_allocator, allocator, base);
+ 	struct wlr_anland_backend *backend = allocator->backend;
+ 
+-	if (!backend->display || is_fallback(backend->display)) {
++	if (!backend || !backend->display || is_fallback(backend->display)) {
+ 		return NULL;
+ 	}
+ 
+@@ -97,9 +97,18 @@ static struct wlr_buffer *allocator_create_buffer(
+ static void allocator_destroy(struct wlr_allocator *wlr_allocator) {
+ 	struct wlr_anland_allocator *allocator =
+ 		wl_container_of(wlr_allocator, allocator, base);
++	wl_list_remove(&allocator->backend_destroy.link);
+ 	free(allocator);
+ }
+ 
++static void backend_destroy_handle(struct wl_listener *listener, void *data) {
++	struct wlr_anland_allocator *allocator =
++		wl_container_of(listener, allocator, backend_destroy);
++	allocator->backend = NULL;
++	wl_list_remove(&allocator->backend_destroy.link);
++	wl_list_init(&allocator->backend_destroy.link);
++}
++
+ static const struct wlr_allocator_interface allocator_impl = {
+ 	.create_buffer = allocator_create_buffer,
+ 	.destroy = allocator_destroy,
+@@ -113,5 +122,7 @@ struct wlr_allocator *wlr_anland_allocator_create(
+ 	}
+ 	wlr_allocator_init(&allocator->base, &allocator_impl, WLR_BUFFER_CAP_DMABUF);
+ 	allocator->backend = backend;
++	allocator->backend_destroy.notify = backend_destroy_handle;
++	wl_signal_add(&backend->backend.events.destroy, &allocator->backend_destroy);
+ 	return &allocator->base;
+ }
+diff --git a/backend/anland/anland.h b/backend/anland/anland.h
+index 265e44f..dd2c647 100644
+--- a/backend/anland/anland.h
++++ b/backend/anland/anland.h
+@@ -58,6 +58,7 @@ struct wlr_anland_buffer {
+ struct wlr_anland_allocator {
+ 	struct wlr_allocator base;
+ 	struct wlr_anland_backend *backend;
++	struct wl_listener backend_destroy;
+ };
+ 
+ struct wlr_anland_backend *anland_backend_from_backend(
+diff --git a/backend/anland/backend.c b/backend/anland/backend.c
+index 0df2e2b..2b94601 100644
+--- a/backend/anland/backend.c
++++ b/backend/anland/backend.c
+@@ -255,6 +255,9 @@ error_display:
+ 	if (backend->display) {
+ 		disconnect(backend->display);
+ 	}
++	if (backend->allocator) {
++		wlr_allocator_destroy(backend->allocator);
++	}
+ 	wlr_keyboard_finish(&backend->keyboard);
+ 	wlr_pointer_finish(&backend->pointer);
+ 	wlr_touch_finish(&backend->touch);
+diff --git a/include/render/egl.h b/include/render/egl.h
+index 103ab57..5c802bd 100644
+--- a/include/render/egl.h
++++ b/include/render/egl.h
+@@ -24,6 +24,7 @@ struct wlr_egl {
+ 		// Client extensions
+ 		bool EXT_device_query;
+ 		bool KHR_platform_gbm;
++		bool MESA_platform_surfaceless;
+ 		bool EXT_platform_device;
+ 		bool KHR_display_reference;
+ 	} exts;
+diff --git a/render/allocator/allocator.c b/render/allocator/allocator.c
+index b7dbf3d..f738b37 100644
+--- a/render/allocator/allocator.c
++++ b/render/allocator/allocator.c
+@@ -4,6 +4,10 @@
+ #include <unistd.h>
+ #include <wlr/backend.h>
+ #include <wlr/config.h>
++#if WLR_HAS_ANLAND_BACKEND
++#include <wlr/backend/anland.h>
++#include "backend/multi.h"
++#endif
+ #include <wlr/interfaces/wlr_buffer.h>
+ #include <wlr/render/allocator.h>
+ #include <wlr/util/log.h>
+@@ -21,6 +25,15 @@
+ #include "render/allocator/udmabuf.h"
+ #endif
+ 
++#if WLR_HAS_ANLAND_BACKEND
++static void find_anland_allocator(struct wlr_backend *candidate, void *data) {
++	struct wlr_allocator **allocator = data;
++	if (*allocator == NULL && wlr_backend_is_anland(candidate)) {
++		*allocator = wlr_anland_backend_get_allocator(candidate);
++	}
++}
++#endif
++
+ void wlr_allocator_init(struct wlr_allocator *alloc,
+ 		const struct wlr_allocator_interface *impl, uint32_t buffer_caps) {
+ 	assert(impl && impl->destroy && impl->create_buffer);
+@@ -97,6 +110,18 @@ static int reopen_drm_node(int drm_fd, bool allow_render_node) {
+ 
+ struct wlr_allocator *wlr_allocator_autocreate(struct wlr_backend *backend,
+ 		struct wlr_renderer *renderer) {
++#if WLR_HAS_ANLAND_BACKEND
++	struct wlr_allocator *anland_allocator = NULL;
++	if (wlr_backend_is_multi(backend)) {
++		wlr_multi_for_each_backend(backend, find_anland_allocator,
++			&anland_allocator);
++	} else if (wlr_backend_is_anland(backend)) {
++		anland_allocator = wlr_anland_backend_get_allocator(backend);
++	}
++	if (anland_allocator != NULL) {
++		return anland_allocator;
++	}
++#endif
+ 	uint32_t backend_caps = backend->buffer_caps;
+ 	uint32_t renderer_caps = renderer->render_buffer_caps;
+ 
+diff --git a/render/egl.c b/render/egl.c
+index 6f3e9c8..568390e 100644
+--- a/render/egl.c
++++ b/render/egl.c
+@@ -220,6 +220,8 @@ static struct wlr_egl *egl_create(void) {
+ 
+ 	egl->exts.KHR_platform_gbm = check_egl_ext(client_exts_str,
+ 			"EGL_KHR_platform_gbm");
++	egl->exts.MESA_platform_surfaceless = check_egl_ext(client_exts_str,
++			"EGL_MESA_platform_surfaceless");
+ 	egl->exts.EXT_platform_device = check_egl_ext(client_exts_str,
+ 			"EGL_EXT_platform_device");
+ 	egl->exts.KHR_display_reference = check_egl_ext(client_exts_str,
+@@ -564,6 +566,18 @@ struct wlr_egl *wlr_egl_create_with_drm_fd(int drm_fd) {
+ 		return NULL;
+ 	}
+ 
++	if (drm_fd < 0) {
++		if (!egl->exts.MESA_platform_surfaceless) {
++			wlr_log(WLR_ERROR, "EGL_MESA_platform_surfaceless not supported");
++			goto error;
++		}
++		if (egl_init(egl, EGL_PLATFORM_SURFACELESS_MESA, NULL)) {
++			wlr_log(WLR_DEBUG, "Using EGL_PLATFORM_SURFACELESS_MESA");
++			return egl;
++		}
++		goto error;
++	}
++
+ 	if (egl->exts.EXT_platform_device) {
+ 		/*
+ 		 * Search for the EGL device matching the DRM fd using the
+diff --git a/render/wlr_renderer.c b/render/wlr_renderer.c
+index e65314c..0af1e52 100644
+--- a/render/wlr_renderer.c
++++ b/render/wlr_renderer.c
+@@ -15,6 +15,10 @@
+ #include <xf86drm.h>
+ 
+ #include <wlr/config.h>
++#if WLR_HAS_ANLAND_BACKEND
++#include <wlr/backend/anland.h>
++#include <wlr/backend/multi.h>
++#endif
+ 
+ #if WLR_HAS_GLES2_RENDERER
+ #include <wlr/render/egl.h>
+@@ -139,11 +143,37 @@ out:
+ 	return fd;
+ }
+ 
++#if WLR_HAS_ANLAND_BACKEND
++static void detect_anland_backend(struct wlr_backend *backend, void *data) {
++	bool *found = data;
++	if (wlr_backend_is_anland(backend)) {
++		*found = true;
++	}
++}
++
++static bool backend_has_anland(struct wlr_backend *backend) {
++	if (wlr_backend_is_anland(backend)) {
++		return true;
++	}
++	if (!wlr_backend_is_multi(backend)) {
++		return false;
++	}
++	bool found = false;
++	wlr_multi_for_each_backend(backend, detect_anland_backend, &found);
++	return found;
++}
++#endif
++
+ static bool open_preferred_drm_fd(struct wlr_backend *backend, int *drm_fd_ptr,
+ 		bool *own_drm_fd) {
+ 	if (*drm_fd_ptr >= 0) {
+ 		return true;
+ 	}
++	#if WLR_HAS_ANLAND_BACKEND
++	if (backend_has_anland(backend)) {
++		return true;
++	}
++	#endif
+ 
+ 	if (env_parse_bool("WLR_RENDERER_FORCE_SOFTWARE")) {
+ 		*drm_fd_ptr = -1;
