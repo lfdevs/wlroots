@@ -1,2 +1,15 @@
 Revert-layer-shell-error-on-0-dimension-without-anchors.patch
 seat-Don-t-forget-to-destroy-touch-points-on-touch-up.patch
+anland/0001-backend-add-Anland-transport-and-output-backend.patch
+anland/0002-render-use-surfaceless-EGL-for-Anland.patch
+anland/0003-backend-add-optional-Anland-PipeWire-services.patch
+anland/0004-backend-guard-optional-Anland-headers.patch
+anland/0005-backend-validate-Anland-display-setup.patch
+anland/0006-backend-use-the-public-output-state-interface.patch
+anland/0007-backend-pass-Anland-render-fences.patch
+anland/0008-backend-clarify-Anland-service-lifetimes.patch
+anland/0009-backend-defer-camera-nodes-until-PipeWire-is-ready.patch
+anland/0010-backend-handle-Anland-fence-send-failures.patch
+anland/0011-backend-harden-Anland-stream-framing.patch
+anland/0012-backend-make-Anland-fd-passing-atomic.patch
+anland/0013-backend-silence-PipeWire-header-aliasing-warnings.patch

@@ -1,0 +1,55 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 08:37:54 +0800
+Subject: backend: silence PipeWire header aliasing warnings
+
+PipeWire's SPA headers trigger wlroots' strict-aliasing warning under Debian's -Werror build flags. Limit the diagnostic suppression to the third-party header includes used by the Anland audio and camera bridges.
+---
+ backend/anland/anland_audio.c  | 7 +++++++
+ backend/anland/anland_camera.c | 7 +++++++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/backend/anland/anland_audio.c b/backend/anland/anland_audio.c
+index e5f7568..126d5b1 100644
+--- a/backend/anland/anland_audio.c
++++ b/backend/anland/anland_audio.c
+@@ -12,10 +12,17 @@
+ #include <time.h>
+ #include <unistd.h>
+ 
++#if defined(__GNUC__) || defined(__clang__)
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wstrict-aliasing"
++#endif
+ #include <pipewire/pipewire.h>
+ #include <spa/param/audio/format-utils.h>
+ #include <spa/pod/builder.h>
+ #include <spa/utils/hook.h>
++#if defined(__GNUC__) || defined(__clang__)
++#pragma GCC diagnostic pop
++#endif
+ 
+ /* Default formats until the consumer negotiates the real device formats (protocol.h):
+  * playback stereo L,R, mic mono, both S16LE. */
+diff --git a/backend/anland/anland_camera.c b/backend/anland/anland_camera.c
+index d46f864..9669117 100644
+--- a/backend/anland/anland_camera.c
++++ b/backend/anland/anland_camera.c
+@@ -15,11 +15,18 @@
+ 
+ #include <sys/mman.h>
+ 
++#if defined(__GNUC__) || defined(__clang__)
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wstrict-aliasing"
++#endif
+ #include <pipewire/pipewire.h>
+ #include <spa/param/video/format-utils.h>
+ #include <spa/param/buffers.h>
+ #include <spa/pod/builder.h>
+ #include <spa/utils/hook.h>
++#if defined(__GNUC__) || defined(__clang__)
++#pragma GCC diagnostic pop
++#endif
+ 
+ /*
+  * Control-channel protocol + stream/shm protocol. MUST stay in sync with the
