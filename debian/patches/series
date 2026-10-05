@@ -2,3 +2,4 @@ Revert-layer-shell-error-on-0-dimension-without-anchors.patch
 anland/0001-backend-add-Anland-transport-and-output-backend.patch
 anland/0002-render-use-surfaceless-EGL-for-Anland.patch
 anland/0003-backend-add-optional-Anland-PipeWire-services.patch
+anland/0004-backend-guard-optional-Anland-headers.patch
