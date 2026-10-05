@@ -11,3 +11,4 @@ anland/0008-backend-clarify-Anland-service-lifetimes.patch
 anland/0009-backend-defer-camera-nodes-until-PipeWire-is-ready.patch
 anland/0010-backend-handle-Anland-fence-send-failures.patch
 anland/0011-backend-harden-Anland-stream-framing.patch
+anland/0012-backend-make-Anland-fd-passing-atomic.patch
