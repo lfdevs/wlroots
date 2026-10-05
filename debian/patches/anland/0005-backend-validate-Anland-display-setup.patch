@@ -1,0 +1,36 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 04:18:07 +0800
+Subject: backend: validate Anland display setup
+
+Reject missing socket paths and invalid screen dimensions before creating wlroots input and output objects, avoiding malformed daemon state and null-path failures during backend initialization.
+---
+ backend/anland/backend.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/backend/anland/backend.c b/backend/anland/backend.c
+index 87e5f3d..1bad21f 100644
+--- a/backend/anland/backend.c
++++ b/backend/anland/backend.c
+@@ -218,6 +218,9 @@ struct wlr_backend *wlr_anland_backend_create(struct wl_event_loop *loop,
+ 	backend->event_loop = loop;
+ 	wl_list_init(&backend->outputs);
+ 	backend->socket_path = strdup(socket_path ? socket_path : DEFAULT_SOCKET_PATH);
++	if (!backend->socket_path) {
++		goto error;
++	}
+ 	backend->scale = 1.0f;
+ 	const char *scale = getenv("WLR_ANLAND_SCALE");
+ 	if (scale) {
+@@ -235,6 +238,12 @@ struct wlr_backend *wlr_anland_backend_create(struct wl_event_loop *loop,
+ 	}
+ 	get_screen_info(backend->display, &backend->screen_width,
+ 		&backend->screen_height, &backend->pixel_format, &backend->refresh);
++	if (backend->screen_width == 0 || backend->screen_height == 0) {
++		wlr_log(WLR_ERROR, "Anland daemon reported an invalid screen size");
++		disconnect(backend->display);
++		backend->display = NULL;
++		goto error;
++	}
+ 	if (backend->refresh == 0) {
+ 		backend->refresh = DEFAULT_REFRESH;
+ 	}
