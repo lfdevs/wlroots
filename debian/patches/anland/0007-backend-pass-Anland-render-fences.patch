@@ -1,0 +1,64 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 04:23:31 +0800
+Subject: backend: pass Anland render fences
+
+Export a DMA-BUF sync file after rendering when the kernel and driver support it, then attach the fence to the Anland refresh message so the consumer can queue the buffer without a GPU completion stall.
+---
+ backend/anland/output.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/backend/anland/output.c b/backend/anland/output.c
+index c36ac1a..5296190 100644
+--- a/backend/anland/output.c
++++ b/backend/anland/output.c
+@@ -4,10 +4,12 @@
+ 
+ #include <wlr/interfaces/wlr_output.h>
+ #include <wlr/render/swapchain.h>
++#include <wlr/types/wlr_buffer.h>
+ #include <wlr/types/wlr_output_layer.h>
+ #include <wlr/util/log.h>
+ 
+ #include "anland.h"
++#include "render/dmabuf.h"
+ #include "types/wlr_output.h"
+ 
+ static const uint32_t supported_output_state =
+@@ -16,6 +18,28 @@ static const uint32_t supported_output_state =
+ 	WLR_OUTPUT_STATE_ENABLED |
+ 	WLR_OUTPUT_STATE_MODE;
+ 
++static int anland_export_render_fence(struct wlr_buffer *buffer) {
++	static int support = -1;
++	if (support < 0) {
++		support = dmabuf_check_sync_file_import_export() ? 1 : 0;
++	}
++	if (!support) {
++		return -1;
++	}
++
++	struct wlr_dmabuf_attributes dmabuf = {0};
++	if (!wlr_buffer_get_dmabuf(buffer, &dmabuf) || dmabuf.n_planes < 1) {
++		return -1;
++	}
++	int fence = dmabuf_export_sync_file(dmabuf.fd[0], DMA_BUF_SYNC_READ);
++	if (fence < 0) {
++		/* A driver can still reject the ioctl on a sufficiently new kernel. Do not
++		 * log the same failure for every frame; the transport accepts no fence. */
++		support = 0;
++	}
++	return fence;
++}
++
+ struct wlr_anland_output *anland_output_from_output(
+ 		struct wlr_output *wlr_output) {
+ 	assert(wlr_output_is_anland(wlr_output));
+@@ -83,6 +107,8 @@ static bool output_commit(struct wlr_output *wlr_output,
+ 
+ 	if ((state->committed & WLR_OUTPUT_STATE_BUFFER) &&
+ 			!is_fallback(output->backend->display)) {
++		set_render_fence(output->backend->display,
++			anland_export_render_fence(state->buffer));
+ 		if (trigger_refresh(output->backend->display) < 0) {
+ 			return false;
+ 		}
