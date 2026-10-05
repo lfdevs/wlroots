@@ -1,0 +1,151 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 04:34:36 +0800
+Subject: backend: make Anland fd passing atomic
+
+Mark received SCM_RIGHTS descriptors close-on-exec, handle truncated control messages, close excess descriptors, validate Unix socket paths, and preserve exact stream framing across partial reads.
+---
+ backend/anland/socket_utils.c | 79 ++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 63 insertions(+), 16 deletions(-)
+
+diff --git a/backend/anland/socket_utils.c b/backend/anland/socket_utils.c
+index 1b4ef31..3555c13 100644
+--- a/backend/anland/socket_utils.c
++++ b/backend/anland/socket_utils.c
+@@ -2,6 +2,7 @@
+ 
+ #include <errno.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+@@ -10,19 +11,26 @@
+ int send_fds(int sock, const void *data, size_t data_len,
+              const int *fds, int fd_count)
+ {
++    if (!data || data_len == 0 || !fds || fd_count <= 0) {
++        errno = EINVAL;
++        return -1;
++    }
++
+     struct iovec iov = {
+         .iov_base = (void *)data,
+         .iov_len  = data_len,
+     };
+ 
+-    char cmsg_buf[CMSG_SPACE(sizeof(int) * fd_count)];
+-    memset(cmsg_buf, 0, sizeof(cmsg_buf));
++    size_t cmsg_size = CMSG_SPACE(sizeof(int) * (size_t)fd_count);
++    char *cmsg_buf = calloc(1, cmsg_size);
++    if (!cmsg_buf)
++        return -1;
+ 
+     struct msghdr msg = {
+         .msg_iov        = &iov,
+         .msg_iovlen     = 1,
+         .msg_control    = cmsg_buf,
+-        .msg_controllen = sizeof(cmsg_buf),
++        .msg_controllen = cmsg_size,
+     };
+ 
+     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+@@ -31,47 +39,86 @@ int send_fds(int sock, const void *data, size_t data_len,
+     cmsg->cmsg_len   = CMSG_LEN(sizeof(int) * fd_count);
+     memcpy(CMSG_DATA(cmsg), fds, sizeof(int) * fd_count);
+ 
+-    ssize_t n = sendmsg(sock, &msg, MSG_NOSIGNAL);
++    ssize_t n;
++    do {
++        n = sendmsg(sock, &msg, MSG_NOSIGNAL);
++    } while (n < 0 && errno == EINTR);
++    free(cmsg_buf);
+     return (n == (ssize_t)data_len) ? 0 : -1;
+ }
+ 
+ int recv_fds(int sock, void *data, size_t data_len,
+              int *fds, int fd_count, int *fds_received)
+ {
++    if (!data || data_len == 0 || !fds || fd_count <= 0 || !fds_received) {
++        errno = EINVAL;
++        return -1;
++    }
++    *fds_received = 0;
++
+     struct iovec iov = {
+         .iov_base = data,
+         .iov_len  = data_len,
+     };
+ 
+-    char cmsg_buf[CMSG_SPACE(sizeof(int) * fd_count)];
+-    memset(cmsg_buf, 0, sizeof(cmsg_buf));
++    size_t cmsg_size = CMSG_SPACE(sizeof(int) * (size_t)fd_count);
++    char *cmsg_buf = calloc(1, cmsg_size);
++    if (!cmsg_buf)
++        return -1;
+ 
+     struct msghdr msg = {
+         .msg_iov        = &iov,
+         .msg_iovlen     = 1,
+         .msg_control    = cmsg_buf,
+-        .msg_controllen = sizeof(cmsg_buf),
++        .msg_controllen = cmsg_size,
+     };
+ 
+-    ssize_t n = recvmsg(sock, &msg, 0);
+-    if (n <= 0)
++    ssize_t n;
++    do {
++        n = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
++    } while (n < 0 && errno == EINTR);
++    if (n <= 0) {
++        free(cmsg_buf);
+         return -1;
++    }
+ 
+-    *fds_received = 0;
+-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+-    if (cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
++    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg;
++            cmsg = CMSG_NXTHDR(&msg, cmsg)) {
++        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
++            continue;
+         int count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+-        if (count > fd_count)
+-            count = fd_count;
+-        memcpy(fds, CMSG_DATA(cmsg), sizeof(int) * count);
+-        *fds_received = count;
++        int available = fd_count - *fds_received;
++        int copy_count = count < available ? count : available;
++        memcpy(fds + *fds_received, CMSG_DATA(cmsg),
++            sizeof(int) * (size_t)copy_count);
++        *fds_received += copy_count;
++        for (int i = copy_count; i < count; i++) {
++            int fd;
++            memcpy(&fd, (int *)CMSG_DATA(cmsg) + i, sizeof(fd));
++            close(fd);
++        }
+     }
+ 
++    if (msg.msg_flags & MSG_CTRUNC) {
++        for (int i = 0; i < *fds_received; i++)
++            close(fds[i]);
++        *fds_received = 0;
++        free(cmsg_buf);
++        errno = EMSGSIZE;
++        return -1;
++    }
++
++    free(cmsg_buf);
+     return (int)n;
+ }
+ 
+ int connect_unix(const char *path)
+ {
++    if (!path || strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
++        errno = ENAMETOOLONG;
++        return -1;
++    }
++
+     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+     if (fd < 0)
+         return -1;
