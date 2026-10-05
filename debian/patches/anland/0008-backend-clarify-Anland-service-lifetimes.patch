@@ -1,0 +1,38 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 04:24:19 +0800
+Subject: backend: clarify Anland service lifetimes
+
+Describe the PipeWire and camera resource ownership as it is implemented by the wlroots backend, without referring to compositor-specific KWin lifecycle details.
+---
+ backend/anland/anland_audio.h  | 2 +-
+ backend/anland/anland_camera.h | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/backend/anland/anland_audio.h b/backend/anland/anland_audio.h
+index 7412cd6..9cdd6a0 100644
+--- a/backend/anland/anland_audio.h
++++ b/backend/anland/anland_audio.h
+@@ -5,7 +5,7 @@
+  * Producer-side audio engine.
+  *
+  * Owns a persistent PipeWire thread-loop with two streams that live for the whole
+- * KWin session, independent of whether a consumer is connected:
++ * compositor session, independent of whether a consumer is connected:
+  *
+  *   - a sink-monitor capture stream  -> desktop playback PCM written to the audio
+  *                                        socket (heard on the Android speaker);
+diff --git a/backend/anland/anland_camera.h b/backend/anland/anland_camera.h
+index ad940c3..e18bee3 100644
+--- a/backend/anland/anland_camera.h
++++ b/backend/anland/anland_camera.h
+@@ -22,8 +22,8 @@
+  * STOP_RECORD when the last consumer goes away). Frames arrive in the layout announced
+  * by each stream_fd and are emitted by that camera's Video/Source.
+  *
+- * All fds passed to set_resources are OWNED by the engine (SCM_RIGHTS dups) and closed
+- * in clear()/stop().
++ * All fds passed to set_resources are transferred to the engine and closed in
++ * clear()/stop().
+  */
+ 
+ #ifdef __cplusplus
