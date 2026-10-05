@@ -6,3 +6,4 @@ anland/0004-backend-guard-optional-Anland-headers.patch
 anland/0005-backend-validate-Anland-display-setup.patch
 anland/0006-backend-use-the-public-output-state-interface.patch
 anland/0007-backend-pass-Anland-render-fences.patch
+anland/0008-backend-clarify-Anland-service-lifetimes.patch
