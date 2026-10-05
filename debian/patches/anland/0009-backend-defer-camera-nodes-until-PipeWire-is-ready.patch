@@ -1,0 +1,24 @@
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 5 Oct 2026 04:26:40 +0800
+Subject: backend: defer camera nodes until PipeWire is ready
+
+Keep camera resource fds attached while PipeWire reconnects, but only create virtual video streams after a live PipeWire core is available. This allows camera forwarding to recover when the sound service starts late.
+---
+ backend/anland/anland_camera.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/backend/anland/anland_camera.c b/backend/anland/anland_camera.c
+index e1b65c0..d46f864 100644
+--- a/backend/anland/anland_camera.c
++++ b/backend/anland/anland_camera.c
+@@ -821,7 +821,9 @@ void anland_camera_set_resources(int ctrl_fd, const int *stream_fds, int num_cam
+             cam->fmt_w = qw[i];
+             cam->fmt_h = qh[i];
+         }
+-        create_node(cam);
++        if (c->pw_connected && c->core) {
++            create_node(cam);
++        }
+         attach_fd(cam, stream_fds[i]);
+     }
+ 
