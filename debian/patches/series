@@ -9,3 +9,4 @@ anland/0006-backend-use-the-public-output-state-interface.patch
 anland/0007-backend-pass-Anland-render-fences.patch
 anland/0008-backend-clarify-Anland-service-lifetimes.patch
 anland/0009-backend-defer-camera-nodes-until-PipeWire-is-ready.patch
+anland/0010-backend-handle-Anland-fence-send-failures.patch
